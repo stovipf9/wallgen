@@ -496,40 +496,83 @@ fn taper(tip: f32, mid: f32, tail: f32, t: f32) -> f32 {
     }
 }
 
-/// Scatter `fragment_count` Dreamcore fragments (`eyes` / `glyph_cell` / `icon` / `digits`, chosen
+enum RefPointKind {
+    LeftUpper,
+    Center,
+}
+
+/// Scatter `fragment_count` Dreamcore fragments (`eyes` / `glyph_words` / `icon` / `digits`, chosen
 /// uniformly at random) at independently random positions across a `width` x `height` canvas —
 /// no overlap avoidance, matching the "sparse and inconsistent" scattering the style calls for.
-/// Background is `palette.base00`; each fragment independently picks one of the 8 accent colors
-/// (`base08`..`base0f`) at random.
-pub fn render_dreamcore(
+/// Drawn on the background shade; each fragment independently picks an accent color at random,
+/// which is what says the fragments are unrelated to one another.
+pub fn render_dreamcore<R: Rng>(
     palette: &Palette,
     width: u32,
     height: u32,
     fragment_count: usize,
-    rng: &mut impl Rng,
+    rng: &mut R,
 ) -> Pixmap {
     let mut pixmap = Pixmap::new(width, height).unwrap();
 
     pixmap.fill(to_color(palette.base00));
 
+    // Where to put one fragment, given the size of the smallest rectangle that encloses everything
+    // it draws. Both kinds place that rectangle, not any one mark inside it: `LeftUpper` returns
+    // its top-left corner and `Center` its middle, and a caller that hands over anything but the
+    // enclosing extent gets a fragment that clips at the edge instead of hanging off it by its own
+    // size, which is the whole allowance this is here to grant.
+    let ref_point =
+        |rng: &mut R, ref_point_kind: RefPointKind, fragment_width: f32, fragment_height: f32| {
+            let gen_uniform = |rng: &mut R| rng.gen_range(0.0..1.0);
+            Point::from_xy(
+                gen_uniform(rng) * width as f32
+                    + match ref_point_kind {
+                        RefPointKind::LeftUpper => -gen_uniform(rng),
+                        RefPointKind::Center => gen_uniform(rng) - 0.5,
+                    } * fragment_width,
+                gen_uniform(rng) * height as f32
+                    + match ref_point_kind {
+                        RefPointKind::LeftUpper => -gen_uniform(rng),
+                        RefPointKind::Center => gen_uniform(rng) - 0.5,
+                    } * fragment_height,
+            )
+        };
+    let min_wh = width.min(height) as f64;
     for _ in 0..fragment_count {
-        let palette_all = palette.all();
         let mut paint = Paint::default();
-        paint.set_color(to_color(palette_all[rng.gen_range(8..palette_all.len())]));
-        let min_wh = width.min(height) as f64;
+        paint.set_color(to_color(
+            *palette.all()[8..]
+                .choose(rng)
+                .expect("color should be determined"),
+        ));
         match rng.gen_range(0..4) {
             0 => {
-                let eyes = eyes(rng.gen_range(0.5..1.0) * min_wh * 0.01, rng);
-                let left_upper = Point::from_xy(
-                    rng.gen_range(0.0..width as f32)
-                        - rng.gen_range(0.0..1.0) * (eyes.size_a + eyes.gap + eyes.size_b) as f32,
-                    rng.gen_range(0.0..height as f32)
-                        - rng.gen_range(0.0..1.0) * eyes.size_a.max(eyes.size_b) as f32,
+                // Nominal size of a pair, as how many would fit across the short side. Small
+                // enough to read as a detail rather than as the subject — the style wants
+                // fragments, and a pair of eyes large enough to be looked *at* resolves the
+                // scene. The name is not currently true of the drawn extent; see the reconcile
+                // item in #2.
+                const EYES_PER_SCREEN_RANGE: RangeInclusive<f64> = 10.0..=100.0;
+                let eyes = eyes(min_wh / rng.gen_range(EYES_PER_SCREEN_RANGE), rng);
+                // The second mark sits `dy` off the first and `dy` goes either way, so neither
+                // mark is reliably the top one and the pair reaches further down the page than
+                // either alone. Both facts are about the enclosing rectangle `ref_point` wants:
+                // its height is the span of the two marks together, and its top edge belongs to
+                // whichever of them is higher. Taking the taller mark's height instead, as this
+                // did, understated the rectangle by `dy` and put a mark outside it.
+                let second_is_higher = (-eyes.dy).max(0.0);
+                let left_upper = ref_point(
+                    rng,
+                    RefPointKind::LeftUpper,
+                    (eyes.size_a + eyes.gap + eyes.size_b) as f32,
+                    (eyes.size_a.max(eyes.dy + eyes.size_b) + second_is_higher) as f32,
                 );
+                let first_top = left_upper.y + second_is_higher as f32;
                 pixmap.fill_rect(
                     Rect::from_xywh(
                         left_upper.x,
-                        left_upper.y,
+                        first_top,
                         eyes.size_a as f32,
                         eyes.size_a as f32,
                     )
@@ -540,8 +583,8 @@ pub fn render_dreamcore(
                 );
                 pixmap.fill_rect(
                     Rect::from_xywh(
-                        left_upper.x + eyes.size_a as f32 + eyes.gap as f32,
-                        left_upper.y + eyes.dy as f32,
+                        left_upper.x + (eyes.size_a + eyes.gap) as f32,
+                        first_top + eyes.dy as f32,
                         eyes.size_b as f32,
                         eyes.size_b as f32,
                     )
@@ -552,21 +595,32 @@ pub fn render_dreamcore(
                 );
             }
             1 => {
-                let base_size = rng.gen_range(0.3..1.0) * min_wh * 0.01;
-                let glyph_cell = glyph_words(rng.gen_range(1..10), rng);
+                // Size of one *cell* of one character, as how many would fit across the short
+                // side — so a whole word is a good deal larger than this suggests. The finest of
+                // the four fragment kinds, because writing read at a distance is texture, and a
+                // glyph large enough to be studied invites being read.
+                const GLYPH_PER_SCREEN_RANGE: RangeInclusive<f64> = 100.0..=300.0;
+                // Characters in one run. From one, which reads as a mark, to enough to read as a
+                // phrase without becoming a line of prose.
+                const GLYPH_WORDS_LENGTH_RANGE: RangeInclusive<usize> = 1..=10;
+                // Space between words, measured in the gaps between cells inside a word. Over one
+                // is what makes a run parse as several words rather than one long one, the same
+                // way word spacing works in real type.
+                const GRID_GAP_RATIO_RANGE: RangeInclusive<f32> = 1.5..=2.0;
+                let base_size = min_wh / rng.gen_range(GLYPH_PER_SCREEN_RANGE);
+                let glyph_cell = glyph_words(rng.gen_range(GLYPH_WORDS_LENGTH_RANGE), rng);
+                // A cell and the gap beside it are both one `base_size`: an even checker, so no
+                // stroke weight is implied and the grid reads as a matrix display rather than as
+                // letterforms with a thickness.
                 let cell_size = base_size as f32;
                 let cell_gap = base_size as f32;
-                let grid_gap = cell_gap * rng.gen_range(1.2..2.0) as f32;
-                let left_upper = Point::from_xy(
-                    rng.gen_range(0.0..width as f32)
-                        - rng.gen_range(0.0..1.0)
-                            * (glyph_cell.filled.len() as f32
-                                * (glyph_cell.cols as f32 * (cell_size + cell_gap) - cell_gap
-                                    + grid_gap)
-                                - grid_gap),
-                    rng.gen_range(0.0..height as f32)
-                        - rng.gen_range(0.0..1.0)
-                            * (glyph_cell.rows as f32 * (cell_size + cell_gap) - cell_gap),
+                let grid_gap = cell_gap * rng.gen_range(GRID_GAP_RATIO_RANGE);
+                let grid_width = glyph_cell.cols as f32 * (cell_size + cell_gap) - cell_gap;
+                let left_upper = ref_point(
+                    rng,
+                    RefPointKind::LeftUpper,
+                    glyph_cell.filled.len() as f32 * (grid_width + grid_gap) - grid_gap,
+                    glyph_cell.rows as f32 * (cell_size + cell_gap) - cell_gap,
                 );
                 for (i_grid, grid) in glyph_cell.filled.iter().enumerate() {
                     for (j_cell, cell_filled) in grid.iter().enumerate() {
@@ -576,9 +630,7 @@ pub fn render_dreamcore(
                         pixmap.fill_rect(
                             Rect::from_xywh(
                                 left_upper.x
-                                    + (glyph_cell.cols as f32 * (cell_size + cell_gap) - cell_gap
-                                        + grid_gap)
-                                        * i_grid as f32
+                                    + (grid_width + grid_gap) * i_grid as f32
                                     + (j_cell % glyph_cell.cols) as f32 * (cell_size + cell_gap),
                                 left_upper.y
                                     + (j_cell / glyph_cell.cols) as f32 * (cell_size + cell_gap),
@@ -594,35 +646,42 @@ pub fn render_dreamcore(
                 }
             }
             2 => {
-                let base_size = rng.gen_range(0.3..1.0) * min_wh * 0.1;
-                let center = Point::from_xy(
-                    rng.gen_range(0.0..1.0) * width as f32
-                        + rng.gen_range(-0.5..0.5) * base_size as f32,
-                    rng.gen_range(0.0..1.0) * height as f32
-                        + rng.gen_range(-0.5..0.5) * base_size as f32,
-                );
+                // Nominal size of an icon, as how many would fit across the short side. The
+                // coarsest of the four kinds by an order of magnitude: a pictogram is read as one
+                // sign rather than as texture, so it has to be large enough to have a shape. The
+                // name is not currently true of the drawn extent; see the reconcile item in #2.
+                const ICON_PER_SCREEN_RANGE: RangeInclusive<f64> = 3.0..=10.0;
+                // Stroke weight, against the icon's own diameter, so an icon keeps its weight as
+                // it changes size. The span is wide on purpose — a hairline outline and a heavy
+                // marker-drawn one are both wanted, and which it is is the loudest thing about a
+                // pictogram after its shape.
+                const STROKE_WIDTH_RATIO_RANGE: RangeInclusive<f32> = 0.01..=0.1;
+                let base_size = min_wh / rng.gen_range(ICON_PER_SCREEN_RANGE);
+                let icon = icon(base_size, rng);
+                let diameter = icon.size as f32;
+                let radius = diameter / 2.0;
+                let center = ref_point(rng, RefPointKind::Center, diameter, diameter);
                 let stroke = Stroke {
-                    width: base_size as f32 * rng.gen_range(0.01..0.1),
+                    width: (diameter * rng.gen_range(STROKE_WIDTH_RATIO_RANGE)).max(1.0),
                     ..Default::default()
                 };
-                let icon = icon(base_size, rng);
                 match icon.shape {
                     IconShape::Cross => {
-                        let mut pb1 = PathBuilder::new();
-                        pb1.move_to(center.x + base_size as f32 / 2.0, center.y);
-                        pb1.line_to(center.x - base_size as f32 / 2.0, center.y);
+                        let mut pb = PathBuilder::new();
+                        pb.move_to(center.x + radius, center.y);
+                        pb.line_to(center.x - radius, center.y);
                         pixmap.stroke_path(
-                            &pb1.finish().unwrap(),
+                            &pb.finish().unwrap(),
                             &paint,
                             &stroke,
                             Transform::identity(),
                             None,
                         );
-                        let mut pb2 = PathBuilder::new();
-                        pb2.move_to(center.x, center.y + base_size as f32 / 2.0);
-                        pb2.line_to(center.x, center.y - base_size as f32 / 2.0);
+                        pb = PathBuilder::new();
+                        pb.move_to(center.x, center.y + radius);
+                        pb.line_to(center.x, center.y - radius);
                         pixmap.stroke_path(
-                            &pb2.finish().unwrap(),
+                            &pb.finish().unwrap(),
                             &paint,
                             &stroke,
                             Transform::identity(),
@@ -630,42 +689,40 @@ pub fn render_dreamcore(
                         );
                     }
                     IconShape::DiagonalPair { angle } => {
-                        let open_angle = rng.gen_range(0.0625 * TAU..0.125 * TAU);
-                        let mut pb1 = PathBuilder::new();
-                        pb1.move_to(
-                            center.x + base_size as f32 / 2.0 * (angle as f32 + open_angle).cos(),
-                            center.y + base_size as f32 / 2.0 * (angle as f32 + open_angle).sin(),
+                        // Half the angle between the pair's two strokes, as a fraction of a full
+                        // turn. Away from zero so the two never coincide into a single line, and
+                        // well under a quarter turn so they never square up into a cross — which
+                        // is the neighboring variant, and a sign in its own right.
+                        const OPEN_ANGLE_RATIO_RANGE: RangeInclusive<f32> = 1.0 / 16.0..=1.0 / 8.0;
+                        let angle = angle as f32;
+                        let open_angle = rng.gen_range(OPEN_ANGLE_RATIO_RANGE) * TAU;
+                        let mut pb = PathBuilder::new();
+                        pb.move_to(
+                            center.x + radius * (angle + open_angle).cos(),
+                            center.y + radius * (angle + open_angle).sin(),
                         );
-                        pb1.line_to(
-                            center.x
-                                + base_size as f32 / 2.0
-                                    * (angle as f32 + TAU / 2.0 - open_angle).cos(),
-                            center.y
-                                + base_size as f32 / 2.0
-                                    * (angle as f32 + TAU / 2.0 - open_angle).sin(),
+                        pb.line_to(
+                            center.x + radius * (angle + TAU / 2.0 - open_angle).cos(),
+                            center.y + radius * (angle + TAU / 2.0 - open_angle).sin(),
                         );
                         pixmap.stroke_path(
-                            &pb1.finish().unwrap(),
+                            &pb.finish().unwrap(),
                             &paint,
                             &stroke,
                             Transform::identity(),
                             None,
                         );
-                        let mut pb2 = PathBuilder::new();
-                        pb2.move_to(
-                            center.x + base_size as f32 / 2.0 * (angle as f32 - open_angle).cos(),
-                            center.y + base_size as f32 / 2.0 * (angle as f32 - open_angle).sin(),
+                        pb = PathBuilder::new();
+                        pb.move_to(
+                            center.x + radius * (angle - open_angle).cos(),
+                            center.y + radius * (angle - open_angle).sin(),
                         );
-                        pb2.line_to(
-                            center.x
-                                + base_size as f32 / 2.0
-                                    * (angle as f32 - TAU / 2.0 + open_angle).cos(),
-                            center.y
-                                + base_size as f32 / 2.0
-                                    * (angle as f32 - TAU / 2.0 + open_angle).sin(),
+                        pb.line_to(
+                            center.x + radius * (angle - TAU / 2.0 + open_angle).cos(),
+                            center.y + radius * (angle - TAU / 2.0 + open_angle).sin(),
                         );
                         pixmap.stroke_path(
-                            &pb2.finish().unwrap(),
+                            &pb.finish().unwrap(),
                             &paint,
                             &stroke,
                             Transform::identity(),
@@ -673,19 +730,36 @@ pub fn render_dreamcore(
                         );
                     }
                     IconShape::RingFragment { start_angle, sweep } => {
+                        let start_angle = start_angle as f32;
+                        let sweep = sweep as f32;
                         let mut pb = PathBuilder::new();
                         pb.move_to(
-                            center.x + base_size as f32 / 2.0 * start_angle.cos() as f32,
-                            center.y + base_size as f32 / 2.0 * start_angle.sin() as f32,
+                            center.x + radius * start_angle.cos(),
+                            center.y + radius * start_angle.sin(),
                         );
-                        for i in 1..=36 {
+
+                        // How far the drawn polyline may sit from the arc it stands for. A tenth
+                        // of a pixel is under what anti-aliasing can express — coverage resolves
+                        // to 1/255, so a deviation this small changes an edge pixel by at most a
+                        // level or two — which makes it the point past which a finer subdivision
+                        // buys nothing that can be seen. Inverting the sagitta `r(1 - cos(t/2))`
+                        // through its small-angle form `r*t^2/8` gives the count. The small-angle
+                        // form is conservative rather than approximate here, since `1 - cos x` is
+                        // never above `x^2/2`, and unlike the exact `2*acos(1 - e/r)` it stays
+                        // finite for a radius under the tolerance.
+                        const ARC_TOLERANCE_PX: f32 = 0.1;
+                        // `.max(1.0)` is holding back a panic, not an empty loop: `sweep` can be
+                        // exactly zero, `ceil` then gives no steps, and a path of one `move_to`
+                        // makes `PathBuilder::finish` return `None` for the `expect` below.
+                        let steps = (sweep * (radius / (8.0 * ARC_TOLERANCE_PX)).sqrt())
+                            .ceil()
+                            .max(1.0) as u32;
+
+                        for i in 1..=steps {
+                            let theta = start_angle + sweep * i as f32 / steps as f32;
                             pb.line_to(
-                                center.x
-                                    + base_size as f32 / 2.0
-                                        * (start_angle + sweep * i as f64 / 36.0).cos() as f32,
-                                center.y
-                                    + base_size as f32 / 2.0
-                                        * (start_angle + sweep * i as f64 / 36.0).sin() as f32,
+                                center.x + radius * theta.cos(),
+                                center.y + radius * theta.sin(),
                             );
                         }
                         pixmap.stroke_path(
@@ -699,24 +773,39 @@ pub fn render_dreamcore(
                 }
             }
             _ => {
-                let digits = digits(rng.gen_range(1..10), rng);
-                let base_size = rng.gen_range(0.3..1.0) * min_wh * 0.1;
-                let digit_width = base_size as f32 * rng.gen_range(0.3..1.0);
+                // Cells in one readout. Long enough to look like a reading rather than a mark,
+                // short enough that a viewer does not start looking for a pattern in it.
+                const DIGITS_LENGTH_RANGE: RangeInclusive<usize> = 1..=10;
+                // Width of one cell, as how many would fit across the short side. Between the
+                // icons and the glyphs: a readout is meant to be legible as a display, which a
+                // glyph is not, without being the subject, which an icon is.
+                const DIGIT_PER_SCREEN_RANGE: RangeInclusive<f64> = 10.0..=30.0;
+                // Segment thickness, against the cell's *width* rather than its height, so the
+                // three horizontal bars keep their weight while the aspect below stretches the
+                // vertical ones. The span covers a thin LCD through a chunky LED.
+                const THICKNESS_RATIO_RANGE: RangeInclusive<f32> = 0.14..=0.28;
+                // Space between cells, against a cell's width. Reaching zero would run the readout
+                // into one block; a full cell width is where it stops being one readout.
+                const DIGIT_GAP_RATIO_RANGE: RangeInclusive<f32> = 0.1..=1.0;
+                let digits = digits(rng.gen_range(DIGITS_LENGTH_RANGE), rng);
+                let digit_width = (min_wh / rng.gen_range(DIGIT_PER_SCREEN_RANGE)) as f32;
+                // Twice as tall as wide, fixed rather than drawn: it is what makes a seven-segment
+                // cell read as one, the two stacked squares the layout is built from.
                 let digit_height = digit_width * 2.0;
-                let thickness = digit_width * 0.28;
-                let digit_gap = digit_width * rng.gen_range(0.1..1.0);
-                let left_upper = Point::from_xy(
-                    rng.gen_range(0.0..width as f32)
-                        - rng.gen_range(0.0..1.0)
-                            * ((digit_width + digit_gap) * digits.cells.len() as f32 - digit_gap),
-                    rng.gen_range(0.0..height as f32) - rng.gen_range(0.0..1.0) * digit_height,
+                let thickness = rng.gen_range(THICKNESS_RATIO_RANGE) * digit_width;
+                let digit_gap = digit_width * rng.gen_range(DIGIT_GAP_RATIO_RANGE);
+                let left_upper = ref_point(
+                    rng,
+                    RefPointKind::LeftUpper,
+                    (digit_width + digit_gap) * digits.cells.len() as f32 - digit_gap,
+                    digit_height,
                 );
                 for (i_cell, cell) in digits.cells.iter().enumerate() {
                     for (j_segment, segment) in cell.segments.iter().enumerate() {
                         if !segment {
                             continue;
                         }
-                        let left_upper = Point::from_xy(
+                        let cell_left_upper = Point::from_xy(
                             left_upper.x + i_cell as f32 * (digit_width + digit_gap),
                             left_upper.y,
                         );
@@ -725,8 +814,8 @@ pub fn render_dreamcore(
                                 0 => {
                                     // a
                                     Rect::from_xywh(
-                                        left_upper.x,
-                                        left_upper.y,
+                                        cell_left_upper.x,
+                                        cell_left_upper.y,
                                         digit_width,
                                         thickness,
                                     )
@@ -734,8 +823,8 @@ pub fn render_dreamcore(
                                 1 => {
                                     // b
                                     Rect::from_xywh(
-                                        left_upper.x + digit_width - thickness,
-                                        left_upper.y,
+                                        cell_left_upper.x + digit_width - thickness,
+                                        cell_left_upper.y,
                                         thickness,
                                         digit_height / 2.0,
                                     )
@@ -743,8 +832,8 @@ pub fn render_dreamcore(
                                 2 => {
                                     // c
                                     Rect::from_xywh(
-                                        left_upper.x + digit_width - thickness,
-                                        left_upper.y + digit_height / 2.0,
+                                        cell_left_upper.x + digit_width - thickness,
+                                        cell_left_upper.y + digit_height / 2.0,
                                         thickness,
                                         digit_height / 2.0,
                                     )
@@ -752,8 +841,8 @@ pub fn render_dreamcore(
                                 3 => {
                                     // d
                                     Rect::from_xywh(
-                                        left_upper.x,
-                                        left_upper.y + digit_height - thickness,
+                                        cell_left_upper.x,
+                                        cell_left_upper.y + digit_height - thickness,
                                         digit_width,
                                         thickness,
                                     )
@@ -761,8 +850,8 @@ pub fn render_dreamcore(
                                 4 => {
                                     // e
                                     Rect::from_xywh(
-                                        left_upper.x,
-                                        left_upper.y + digit_height / 2.0,
+                                        cell_left_upper.x,
+                                        cell_left_upper.y + digit_height / 2.0,
                                         thickness,
                                         digit_height / 2.0,
                                     )
@@ -770,8 +859,8 @@ pub fn render_dreamcore(
                                 5 => {
                                     // f
                                     Rect::from_xywh(
-                                        left_upper.x,
-                                        left_upper.y,
+                                        cell_left_upper.x,
+                                        cell_left_upper.y,
                                         thickness,
                                         digit_height / 2.0,
                                     )
@@ -779,8 +868,8 @@ pub fn render_dreamcore(
                                 _ => {
                                     // g
                                     Rect::from_xywh(
-                                        left_upper.x,
-                                        left_upper.y + digit_height / 2.0 - thickness / 2.0,
+                                        cell_left_upper.x,
+                                        cell_left_upper.y + digit_height / 2.0 - thickness / 2.0,
                                         digit_width,
                                         thickness,
                                     )
