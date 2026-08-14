@@ -10,7 +10,7 @@
 //!   - `digits`: each cell's segment pattern must never match a real digit 0-9 — it should
 //!     read as a broken display, not an actual number.
 
-use std::f64::consts::TAU;
+use std::{f64::consts::TAU, ops::RangeInclusive};
 
 use rand::Rng;
 
@@ -22,19 +22,34 @@ pub struct EyeMarks {
     pub dy: f64, // vertical offset between the two marks — nonzero means "not level"
 }
 
+/// How large each mark is against `base_size`. Drawn twice and independently, which is where the
+/// pair's size asymmetry comes from — and also why the asymmetry is only likely rather than
+/// certain. #3 replaces this with a ratio between the two marks.
+const EYE_SIZE_RANGE: RangeInclusive<f64> = 0.5..=2.0;
+/// Space between the marks, against the larger of the two — the pair reads as a gaze rather than
+/// as two unrelated dots only while the gap stays in scale with what it separates.
+const GAP_RANGE: RangeInclusive<f64> = 1.0..=5.0;
+/// How far out of level the pair sits, against `base_size`. The lower end is what keeps "never
+/// level" true rather than merely representable: a smaller one would be a level pair drawn with a
+/// nonzero number in it.
+const DY_RANGE: RangeInclusive<f64> = 0.25..=1.5;
+
 /// Two small marks suggesting a gaze, sized relative to `base_size`. Deliberately asymmetric:
 /// unequal size and never level, so they never complete into a face.
+///
+/// "Never level" holds by construction, since `DY_RANGE` excludes zero. "Unequal size" does not:
+/// the two sizes are independent draws from one range and can coincide. The test for it asserts a
+/// property of the draw rather than of the design, and #3 is where that is made structural.
 pub fn eyes(base_size: f64, rng: &mut impl Rng) -> EyeMarks {
-    let size_a = base_size * rng.gen_range(0.5..2.0);
-    let size_b = base_size * rng.gen_range(0.5..2.0);
+    let size_a = base_size * rng.gen_range(EYE_SIZE_RANGE);
+    let size_b = base_size * rng.gen_range(EYE_SIZE_RANGE);
+    let offset = base_size * rng.gen_range(DY_RANGE);
 
     EyeMarks {
         size_a,
         size_b,
-        gap: size_a.max(size_b) * rng.gen_range(1.0..5.0),
-        dy: base_size
-            * rng.gen_range(f64::MIN_POSITIVE..1.5)
-            * if rng.gen_bool(0.5) { -1.0 } else { 1.0 },
+        gap: size_a.max(size_b) * rng.gen_range(GAP_RANGE),
+        dy: if rng.gen() { -offset } else { offset },
     }
 }
 
@@ -45,11 +60,19 @@ pub struct GlyphWords {
     pub filled: Vec<Vec<bool>>, // len == cols * rows, row-major
 }
 
+/// Cells across one character. Two or three, because a single column reads as punctuation and
+/// four starts to look like a word rather than a glyph.
+const COL_RANGE: RangeInclusive<usize> = 2..=3;
+/// Cells down one character, kept taller than `COL_RANGE` so the glyph has the portrait proportion
+/// writing tends to have.
+const ROW_RANGE: RangeInclusive<usize> = 3..=4;
+
 /// One asemic "character": a small grid of filled/empty cells that reads as written but
 /// resolves to nothing. Never fully empty (falls back to filling at least one cell).
 pub fn glyph_words(count: usize, rng: &mut impl Rng) -> GlyphWords {
-    let cols = rng.gen_range(2..=3) as usize;
-    let rows = rng.gen_range(3..=4) as usize;
+    let cols = rng.gen_range(COL_RANGE);
+    let rows = rng.gen_range(ROW_RANGE);
+
     let mut filled = vec![];
     for _ in 0..count {
         let mut grid = vec![false; cols * rows];
@@ -72,6 +95,15 @@ pub enum IconShape {
     DiagonalPair { angle: f64 },
 }
 
+/// The largest fraction of a full turn a `RingFragment` may sweep. Under 1 so the arc always
+/// leaves a visible gap and never closes into a real ring.
+const MAX_SWEEP_RATIO: f64 = 0.95;
+
+/// How large an icon is against `base_size`. A second per-instance size draw on top of the
+/// per-screen one in `render`, which is why the composed extent is far wider than either range
+/// suggests; #3 removes it and leaves one draw.
+const ICON_SIZE_RANGE: RangeInclusive<f64> = 0.25..=2.0;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Icon {
     pub shape: IconShape,
@@ -88,14 +120,14 @@ pub fn icon(base_size: f64, rng: &mut impl Rng) -> Icon {
         shape: match rng.gen_range(0..3) {
             0 => IconShape::RingFragment {
                 start_angle: rng.gen_range(0.0..TAU),
-                sweep: rng.gen_range(0.0..TAU * 0.95),
+                sweep: rng.gen_range(0.0..MAX_SWEEP_RATIO * TAU),
             },
             1 => IconShape::Cross,
             _ => IconShape::DiagonalPair {
                 angle: rng.gen_range(0.0..TAU),
             },
         },
-        size: base_size * rng.gen_range(f64::MIN_POSITIVE..2.0),
+        size: base_size * rng.gen_range(ICON_SIZE_RANGE),
     }
 }
 
@@ -164,11 +196,15 @@ mod tests {
     use super::*;
     use rand::{rngs::StdRng, SeedableRng};
 
+    /// The `base_size` every generator here is exercised with. Any positive value works — these
+    /// are ratios — so one shared constant keeps the expected bounds readable.
+    const BASE: f64 = 4.0;
+
     #[test]
     fn eyes_are_never_level() {
         let mut rng = StdRng::seed_from_u64(1);
         for _ in 0..500 {
-            let e = eyes(4.0, &mut rng);
+            let e = eyes(BASE, &mut rng);
             assert_ne!(e.dy, 0.0, "eyes must never be level (that reads as a face)");
         }
     }
@@ -177,7 +213,7 @@ mod tests {
     fn eyes_are_never_equal_sized() {
         let mut rng = StdRng::seed_from_u64(2);
         for _ in 0..500 {
-            let e = eyes(4.0, &mut rng);
+            let e = eyes(BASE, &mut rng);
             assert_ne!(e.size_a, e.size_b, "eyes must be unequal in size");
         }
     }
@@ -186,9 +222,10 @@ mod tests {
     fn eyes_sizes_stay_within_a_reasonable_range_of_the_base_size() {
         let mut rng = StdRng::seed_from_u64(3);
         for _ in 0..500 {
-            let e = eyes(4.0, &mut rng);
+            let e = eyes(BASE, &mut rng);
             for s in [e.size_a, e.size_b] {
-                assert!(s > 0.0 && s < 4.0 * 2.0, "size {s} out of expected range");
+                let designed = BASE * EYE_SIZE_RANGE.start()..=BASE * EYE_SIZE_RANGE.end();
+                assert!(designed.contains(&s), "size {s} outside {designed:?}");
             }
         }
     }
@@ -212,8 +249,8 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(5);
         for _ in 0..500 {
             let g = glyph_words(1, &mut rng);
-            assert!((2..=3).contains(&g.cols), "cols {} out of range", g.cols);
-            assert!((3..=4).contains(&g.rows), "rows {} out of range", g.rows);
+            assert!(COL_RANGE.contains(&g.cols), "cols {} out of range", g.cols);
+            assert!(ROW_RANGE.contains(&g.rows), "rows {} out of range", g.rows);
         }
     }
 
@@ -247,11 +284,11 @@ mod tests {
             if let Icon {
                 shape: IconShape::RingFragment { sweep, .. },
                 ..
-            } = icon(4.0, &mut rng)
+            } = icon(BASE, &mut rng)
             {
                 saw_ring_fragment = true;
                 assert!(
-                    sweep < std::f64::consts::TAU * 0.95,
+                    sweep < MAX_SWEEP_RATIO * TAU,
                     "ring fragment sweep {sweep} too close to a full circle"
                 );
             }
@@ -263,10 +300,11 @@ mod tests {
     fn icon_size_stays_within_a_reasonable_range_of_the_base_size() {
         let mut rng = StdRng::seed_from_u64(7);
         for _ in 0..500 {
-            let i = icon(4.0, &mut rng);
+            let i = icon(BASE, &mut rng);
+            let designed = BASE * ICON_SIZE_RANGE.start()..=BASE * ICON_SIZE_RANGE.end();
             assert!(
-                i.size > 0.0 && i.size < 4.0 * 2.0,
-                "size {} out of expected range",
+                designed.contains(&i.size),
+                "size {} outside {designed:?}",
                 i.size
             );
         }
