@@ -40,16 +40,28 @@ const DY_RANGE: RangeInclusive<f64> = 0.25..=1.5;
 /// "Never level" holds by construction, since `DY_RANGE` excludes zero. "Unequal size" does not:
 /// the two sizes are independent draws from one range and can coincide. The test for it asserts a
 /// property of the draw rather than of the design, and #3 is where that is made structural.
-pub fn eyes(base_size: f64, rng: &mut impl Rng) -> EyeMarks {
-    let size_a = base_size * rng.gen_range(EYE_SIZE_RANGE);
-    let size_b = base_size * rng.gen_range(EYE_SIZE_RANGE);
-    let offset = base_size * rng.gen_range(DY_RANGE);
+pub fn eyes(rng: &mut impl Rng) -> EyeMarks {
+    let size_a = rng.gen_range(EYE_SIZE_RANGE);
+    let size_b = rng.gen_range(EYE_SIZE_RANGE);
+    let offset = rng.gen_range(DY_RANGE);
 
     EyeMarks {
         size_a,
         size_b,
         gap: size_a.max(size_b) * rng.gen_range(GAP_RANGE),
         dy: if rng.gen() { -offset } else { offset },
+    }
+}
+
+impl EyeMarks {
+    /// Total span across, in the same units as `size_a`
+    pub fn width(&self) -> f64 {
+        self.size_a + self.gap + self.size_b
+    }
+
+    /// Total span down, in the same units as `size_a`
+    pub fn height(&self) -> f64 {
+        self.size_a.max(self.dy + self.size_b) + (-self.dy).max(0.0)
     }
 }
 
@@ -99,35 +111,21 @@ pub enum IconShape {
 /// leaves a visible gap and never closes into a real ring.
 const MAX_SWEEP_RATIO: f64 = 0.95;
 
-/// How large an icon is against `base_size`. A second per-instance size draw on top of the
-/// per-screen one in `render`, which is why the composed extent is far wider than either range
-/// suggests; #3 removes it and leaves one draw.
-const ICON_SIZE_RANGE: RangeInclusive<f64> = 0.25..=2.0;
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Icon {
-    pub shape: IconShape,
-    pub size: f64,
-}
-
 /// One pseudo-pictogram fragment — ring-fragment, cross, or diagonal-pair — that never resolves
 /// into an actual sign. (`Arrow` was dropped: unlike the others, a directional arrow reads as a
 /// real, functional sign — the same "single element resolves the whole scene" failure as the
 /// literal door and the leveled eyes.) In particular a `RingFragment`'s `sweep` must never reach
 /// a full circle (that would complete into a real ring, a "resolved" whole shape).
-pub fn icon(base_size: f64, rng: &mut impl Rng) -> Icon {
-    Icon {
-        shape: match rng.gen_range(0..3) {
-            0 => IconShape::RingFragment {
-                start_angle: rng.gen_range(0.0..TAU),
-                sweep: rng.gen_range(0.0..MAX_SWEEP_RATIO * TAU),
-            },
-            1 => IconShape::Cross,
-            _ => IconShape::DiagonalPair {
-                angle: rng.gen_range(0.0..TAU),
-            },
+pub fn icon_shape(rng: &mut impl Rng) -> IconShape {
+    match rng.gen_range(0..3) {
+        0 => IconShape::RingFragment {
+            start_angle: rng.gen_range(0.0..TAU),
+            sweep: rng.gen_range(0.0..MAX_SWEEP_RATIO * TAU),
         },
-        size: base_size * rng.gen_range(ICON_SIZE_RANGE),
+        1 => IconShape::Cross,
+        _ => IconShape::DiagonalPair {
+            angle: rng.gen_range(0.0..TAU),
+        },
     }
 }
 
@@ -196,15 +194,11 @@ mod tests {
     use super::*;
     use rand::{rngs::StdRng, SeedableRng};
 
-    /// The `base_size` every generator here is exercised with. Any positive value works — these
-    /// are ratios — so one shared constant keeps the expected bounds readable.
-    const BASE: f64 = 4.0;
-
     #[test]
     fn eyes_are_never_level() {
         let mut rng = StdRng::seed_from_u64(1);
         for _ in 0..500 {
-            let e = eyes(BASE, &mut rng);
+            let e = eyes(&mut rng);
             assert_ne!(e.dy, 0.0, "eyes must never be level (that reads as a face)");
         }
     }
@@ -213,7 +207,7 @@ mod tests {
     fn eyes_are_never_equal_sized() {
         let mut rng = StdRng::seed_from_u64(2);
         for _ in 0..500 {
-            let e = eyes(BASE, &mut rng);
+            let e = eyes(&mut rng);
             assert_ne!(e.size_a, e.size_b, "eyes must be unequal in size");
         }
     }
@@ -222,10 +216,12 @@ mod tests {
     fn eyes_sizes_stay_within_a_reasonable_range_of_the_base_size() {
         let mut rng = StdRng::seed_from_u64(3);
         for _ in 0..500 {
-            let e = eyes(BASE, &mut rng);
+            let e = eyes(&mut rng);
             for s in [e.size_a, e.size_b] {
-                let designed = BASE * EYE_SIZE_RANGE.start()..=BASE * EYE_SIZE_RANGE.end();
-                assert!(designed.contains(&s), "size {s} outside {designed:?}");
+                assert!(
+                    EYE_SIZE_RANGE.contains(&s),
+                    "size {s} outside {EYE_SIZE_RANGE:?}"
+                );
             }
         }
     }
@@ -281,11 +277,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(6);
         let mut saw_ring_fragment = false;
         for _ in 0..500 {
-            if let Icon {
-                shape: IconShape::RingFragment { sweep, .. },
-                ..
-            } = icon(BASE, &mut rng)
-            {
+            if let IconShape::RingFragment { sweep, .. } = icon_shape(&mut rng) {
                 saw_ring_fragment = true;
                 assert!(
                     sweep < MAX_SWEEP_RATIO * TAU,
@@ -294,20 +286,6 @@ mod tests {
             }
         }
         assert!(saw_ring_fragment, "500 draws never produced a RingFragment");
-    }
-
-    #[test]
-    fn icon_size_stays_within_a_reasonable_range_of_the_base_size() {
-        let mut rng = StdRng::seed_from_u64(7);
-        for _ in 0..500 {
-            let i = icon(BASE, &mut rng);
-            let designed = BASE * ICON_SIZE_RANGE.start()..=BASE * ICON_SIZE_RANGE.end();
-            assert!(
-                designed.contains(&i.size),
-                "size {} outside {designed:?}",
-                i.size
-            );
-        }
     }
 
     #[test]

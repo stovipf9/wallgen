@@ -12,7 +12,7 @@ use rand::{seq::SliceRandom, Rng};
 use tiny_skia::{BlendMode, Color, Paint, PathBuilder, Pixmap, Point, Rect, Stroke, Transform};
 
 use crate::{
-    dreamcore::{digits, eyes, glyph_words, icon, IconShape},
+    dreamcore::{digits, eyes, glyph_words, icon_shape, IconShape},
     flow::{advect_rk2, curl_velocity},
     noise::GradientNoise,
     palette::{Palette, Rgb},
@@ -548,33 +548,33 @@ pub fn render_dreamcore<R: Rng>(
         ));
         match rng.gen_range(0..4) {
             0 => {
+                let eyes = eyes(rng);
                 // Nominal size of a pair, as how many would fit across the short side. Small
                 // enough to read as a detail rather than as the subject — the style wants
                 // fragments, and a pair of eyes large enough to be looked *at* resolves the
                 // scene. The name is not currently true of the drawn extent; see the reconcile
                 // item in #2.
-                const EYES_PER_SCREEN_RANGE: RangeInclusive<f64> = 10.0..=100.0;
-                let eyes = eyes(min_wh / rng.gen_range(EYES_PER_SCREEN_RANGE), rng);
+                const EYE_MARK_PER_SCREEN_RANGE: RangeInclusive<f64> = 10.0..=100.0;
+                let base_size = min_wh / rng.gen_range(EYE_MARK_PER_SCREEN_RANGE);
                 // The second mark sits `dy` off the first and `dy` goes either way, so neither
                 // mark is reliably the top one and the pair reaches further down the page than
                 // either alone. Both facts are about the enclosing rectangle `ref_point` wants:
                 // its height is the span of the two marks together, and its top edge belongs to
                 // whichever of them is higher. Taking the taller mark's height instead, as this
                 // did, understated the rectangle by `dy` and put a mark outside it.
-                let second_is_higher = (-eyes.dy).max(0.0);
                 let left_upper = ref_point(
                     rng,
                     RefPointKind::LeftUpper,
-                    (eyes.size_a + eyes.gap + eyes.size_b) as f32,
-                    (eyes.size_a.max(eyes.dy + eyes.size_b) + second_is_higher) as f32,
+                    (eyes.width() * base_size) as f32,
+                    (eyes.height() * base_size) as f32,
                 );
-                let first_top = left_upper.y + second_is_higher as f32;
+                let first_top = left_upper.y + ((-eyes.dy).max(0.0) * base_size) as f32;
                 pixmap.fill_rect(
                     Rect::from_xywh(
                         left_upper.x,
                         first_top,
-                        eyes.size_a as f32,
-                        eyes.size_a as f32,
+                        (eyes.size_a * base_size) as f32,
+                        (eyes.size_a * base_size) as f32,
                     )
                     .unwrap(),
                     &paint,
@@ -583,10 +583,10 @@ pub fn render_dreamcore<R: Rng>(
                 );
                 pixmap.fill_rect(
                     Rect::from_xywh(
-                        left_upper.x + (eyes.size_a + eyes.gap) as f32,
-                        first_top + eyes.dy as f32,
-                        eyes.size_b as f32,
-                        eyes.size_b as f32,
+                        left_upper.x + ((eyes.size_a + eyes.gap) * base_size) as f32,
+                        first_top + (eyes.dy * base_size) as f32,
+                        (eyes.size_b * base_size) as f32,
+                        (eyes.size_b * base_size) as f32,
                     )
                     .unwrap(),
                     &paint,
@@ -595,20 +595,22 @@ pub fn render_dreamcore<R: Rng>(
                 );
             }
             1 => {
+                // Characters in one run. From one, which reads as a mark, to enough to read as a
+                // phrase without becoming a line of prose.
+                const GLYPH_WORDS_LENGTH_RANGE: RangeInclusive<usize> = 1..=10;
+                let glyph_cell = glyph_words(rng.gen_range(GLYPH_WORDS_LENGTH_RANGE), rng);
+
                 // Size of one *cell* of one character, as how many would fit across the short
                 // side — so a whole word is a good deal larger than this suggests. The finest of
                 // the four fragment kinds, because writing read at a distance is texture, and a
                 // glyph large enough to be studied invites being read.
-                const GLYPH_PER_SCREEN_RANGE: RangeInclusive<f64> = 100.0..=300.0;
-                // Characters in one run. From one, which reads as a mark, to enough to read as a
-                // phrase without becoming a line of prose.
-                const GLYPH_WORDS_LENGTH_RANGE: RangeInclusive<usize> = 1..=10;
+                const GLYPH_CELL_PER_SCREEN_RANGE: RangeInclusive<f64> = 100.0..=300.0;
                 // Space between words, measured in the gaps between cells inside a word. Over one
                 // is what makes a run parse as several words rather than one long one, the same
                 // way word spacing works in real type.
                 const GRID_GAP_RATIO_RANGE: RangeInclusive<f32> = 1.5..=2.0;
-                let base_size = min_wh / rng.gen_range(GLYPH_PER_SCREEN_RANGE);
-                let glyph_cell = glyph_words(rng.gen_range(GLYPH_WORDS_LENGTH_RANGE), rng);
+
+                let base_size = min_wh / rng.gen_range(GLYPH_CELL_PER_SCREEN_RANGE);
                 // A cell and the gap beside it are both one `base_size`: an even checker, so no
                 // stroke weight is implied and the grid reads as a matrix display rather than as
                 // letterforms with a thickness.
@@ -646,26 +648,26 @@ pub fn render_dreamcore<R: Rng>(
                 }
             }
             2 => {
+                let icon_shape = icon_shape(rng);
+
                 // Nominal size of an icon, as how many would fit across the short side. The
                 // coarsest of the four kinds by an order of magnitude: a pictogram is read as one
-                // sign rather than as texture, so it has to be large enough to have a shape. The
-                // name is not currently true of the drawn extent; see the reconcile item in #2.
+                // sign rather than as texture, so it has to be large enough to have a shape.
                 const ICON_PER_SCREEN_RANGE: RangeInclusive<f64> = 3.0..=10.0;
+                let base_size = (min_wh / rng.gen_range(ICON_PER_SCREEN_RANGE)) as f32;
+                let radius = base_size / 2.0;
+                let center = ref_point(rng, RefPointKind::Center, base_size, base_size);
+
                 // Stroke weight, against the icon's own diameter, so an icon keeps its weight as
                 // it changes size. The span is wide on purpose — a hairline outline and a heavy
                 // marker-drawn one are both wanted, and which it is is the loudest thing about a
                 // pictogram after its shape.
                 const STROKE_WIDTH_RATIO_RANGE: RangeInclusive<f32> = 0.01..=0.1;
-                let base_size = min_wh / rng.gen_range(ICON_PER_SCREEN_RANGE);
-                let icon = icon(base_size, rng);
-                let diameter = icon.size as f32;
-                let radius = diameter / 2.0;
-                let center = ref_point(rng, RefPointKind::Center, diameter, diameter);
                 let stroke = Stroke {
-                    width: (diameter * rng.gen_range(STROKE_WIDTH_RATIO_RANGE)).max(1.0),
+                    width: (base_size * rng.gen_range(STROKE_WIDTH_RATIO_RANGE)).max(1.0),
                     ..Default::default()
                 };
-                match icon.shape {
+                match icon_shape {
                     IconShape::Cross => {
                         let mut pb = PathBuilder::new();
                         pb.move_to(center.x + radius, center.y);
@@ -776,6 +778,8 @@ pub fn render_dreamcore<R: Rng>(
                 // Cells in one readout. Long enough to look like a reading rather than a mark,
                 // short enough that a viewer does not start looking for a pattern in it.
                 const DIGITS_LENGTH_RANGE: RangeInclusive<usize> = 1..=10;
+                let digits = digits(rng.gen_range(DIGITS_LENGTH_RANGE), rng);
+
                 // Width of one cell, as how many would fit across the short side. Between the
                 // icons and the glyphs: a readout is meant to be legible as a display, which a
                 // glyph is not, without being the subject, which an icon is.
@@ -787,7 +791,6 @@ pub fn render_dreamcore<R: Rng>(
                 // Space between cells, against a cell's width. Reaching zero would run the readout
                 // into one block; a full cell width is where it stops being one readout.
                 const DIGIT_GAP_RATIO_RANGE: RangeInclusive<f32> = 0.1..=1.0;
-                let digits = digits(rng.gen_range(DIGITS_LENGTH_RANGE), rng);
                 let digit_width = (min_wh / rng.gen_range(DIGIT_PER_SCREEN_RANGE)) as f32;
                 // Twice as tall as wide, fixed rather than drawn: it is what makes a seven-segment
                 // cell read as one, the two stacked squares the layout is built from.
