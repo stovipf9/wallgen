@@ -1,1 +1,5 @@
 /target
+
+# renders land here by default, so leaving them untracked means a dirty tree
+# after every run
+/*.png
