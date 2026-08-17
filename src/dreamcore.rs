@@ -224,10 +224,10 @@ pub fn icon_shape(rng: &mut impl Rng) -> IconShape {
 }
 
 impl IconShape {
-    // Half the angle between the pair's two strokes, as a fraction of a full
-    // turn. Away from zero so the two never coincide into a single line, and
-    // well under a quarter turn so they never square up into a cross — which
-    // is the neighboring variant, and a sign in its own right.
+    /// Half the angle between the pair's two strokes, as a fraction of a full
+    /// turn. Away from zero so the two never coincide into a single line, and
+    /// well under a quarter turn so they never square up into a cross — which
+    /// is the neighboring variant, and a sign in its own right.
     const OPEN_ANGLE_RATIO_RANGE: RangeInclusive<f64> = 1.0 / 16.0..=1.0 / 8.0;
     /// The largest fraction of a full turn a `RingFragment` may sweep. Under 1 so the arc always
     /// leaves a visible gap and never closes into a real ring.
