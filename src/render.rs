@@ -12,7 +12,7 @@ use rand::{seq::SliceRandom, Rng};
 use tiny_skia::{BlendMode, Color, Paint, PathBuilder, Pixmap, Point, Rect, Stroke, Transform};
 
 use crate::{
-    dreamcore::{digits, eyes, glyph_words, icon_shape, IconShape},
+    dreamcore::{digits, eyes, glyph_word, icon_shape, IconShape},
     flow::{advect_rk2, curl_velocity},
     noise::GradientNoise,
     palette::{Palette, Rgb},
@@ -501,11 +501,17 @@ enum RefPointKind {
     Center,
 }
 
-/// Scatter `fragment_count` Dreamcore fragments (`eyes` / `glyph_words` / `icon` / `digits`, chosen
-/// uniformly at random) at independently random positions across a `width` x `height` canvas —
-/// no overlap avoidance, matching the "sparse and inconsistent" scattering the style calls for.
-/// Drawn on the background shade; each fragment independently picks an accent color at random,
-/// which is what says the fragments are unrelated to one another.
+/// Scatter `fragment_count` Dreamcore fragments (`eyes` / `glyph_word` / `icon_shape` / `digits`,
+/// chosen uniformly at random) at independently random positions across a `width` x `height`
+/// canvas — no overlap avoidance, matching the "sparse and inconsistent" scattering the style
+/// calls for. Drawn on the background shade; each fragment independently picks an accent color at
+/// random, which is what says the fragments are unrelated to one another.
+///
+/// Each arm draws one number from `*_PER_SCREEN_RANGE` to fix what its kind's own unit is worth in
+/// pixels, and multiplies. Everything else about a fragment — its parts, where they sit, how far
+/// it reaches — comes from `dreamcore` already in that unit, so `min_wh` is the only pixel
+/// quantity here and the arms hold no geometry of their own. `icon_shape` is the exception still
+/// being worked: its three variants are drawn from paths built in this file.
 pub fn render_dreamcore<R: Rng>(
     palette: &Palette,
     width: u32,
@@ -549,102 +555,69 @@ pub fn render_dreamcore<R: Rng>(
         match rng.gen_range(0..4) {
             0 => {
                 let eyes = eyes(rng);
-                // Nominal size of a pair, as how many would fit across the short side. Small
-                // enough to read as a detail rather than as the subject — the style wants
-                // fragments, and a pair of eyes large enough to be looked *at* resolves the
-                // scene. The name is not currently true of the drawn extent; see the reconcile
-                // item in #2.
+                // Size of one mark, as how many would fit across the short side. Small enough to
+                // read as a detail rather than as the subject — the style wants fragments, and a
+                // pair of eyes large enough to be looked *at* resolves the scene.
+                //
+                // Alone among the four it is a nominal rather than an exact size: `EyeMarks` draws
+                // each mark at half to twice this, where the other three kinds size their unit
+                // outright. So a pair spans considerably more than one of these, and how much more
+                // is the reconcile item in #2.
                 const EYE_MARK_PER_SCREEN_RANGE: RangeInclusive<f64> = 10.0..=100.0;
                 let base_size = min_wh / rng.gen_range(EYE_MARK_PER_SCREEN_RANGE);
-                // The second mark sits `dy` off the first and `dy` goes either way, so neither
-                // mark is reliably the top one and the pair reaches further down the page than
-                // either alone. Both facts are about the enclosing rectangle `ref_point` wants:
-                // its height is the span of the two marks together, and its top edge belongs to
-                // whichever of them is higher. Taking the taller mark's height instead, as this
-                // did, understated the rectangle by `dy` and put a mark outside it.
                 let left_upper = ref_point(
                     rng,
                     RefPointKind::LeftUpper,
                     (eyes.width() * base_size) as f32,
                     (eyes.height() * base_size) as f32,
                 );
-                let first_top = left_upper.y + ((-eyes.dy).max(0.0) * base_size) as f32;
-                pixmap.fill_rect(
-                    Rect::from_xywh(
-                        left_upper.x,
-                        first_top,
-                        (eyes.size_a * base_size) as f32,
-                        (eyes.size_a * base_size) as f32,
-                    )
-                    .unwrap(),
-                    &paint,
-                    Transform::identity(),
-                    None,
-                );
-                pixmap.fill_rect(
-                    Rect::from_xywh(
-                        left_upper.x + ((eyes.size_a + eyes.gap) * base_size) as f32,
-                        first_top + (eyes.dy * base_size) as f32,
-                        (eyes.size_b * base_size) as f32,
-                        (eyes.size_b * base_size) as f32,
-                    )
-                    .unwrap(),
-                    &paint,
-                    Transform::identity(),
-                    None,
-                );
+                for (x, y, size) in eyes.marks() {
+                    pixmap.fill_rect(
+                        Rect::from_xywh(
+                            left_upper.x + (x * base_size) as f32,
+                            left_upper.y + (y * base_size) as f32,
+                            (size * base_size) as f32,
+                            (size * base_size) as f32,
+                        )
+                        .unwrap(),
+                        &paint,
+                        Transform::identity(),
+                        None,
+                    );
+                }
             }
             1 => {
-                // Characters in one run. From one, which reads as a mark, to enough to read as a
-                // phrase without becoming a line of prose.
-                const GLYPH_WORDS_LENGTH_RANGE: RangeInclusive<usize> = 1..=10;
-                let glyph_cell = glyph_words(rng.gen_range(GLYPH_WORDS_LENGTH_RANGE), rng);
+                let glyph_word = glyph_word(rng);
 
-                // Size of one *cell* of one character, as how many would fit across the short
-                // side — so a whole word is a good deal larger than this suggests. The finest of
-                // the four fragment kinds, because writing read at a distance is texture, and a
-                // glyph large enough to be studied invites being read.
-                const GLYPH_CELL_PER_SCREEN_RANGE: RangeInclusive<f64> = 100.0..=300.0;
-                // Space between words, measured in the gaps between cells inside a word. Over one
-                // is what makes a run parse as several words rather than one long one, the same
-                // way word spacing works in real type.
-                const GRID_GAP_RATIO_RANGE: RangeInclusive<f32> = 1.5..=2.0;
+                // Size of one *dot*, as how many would fit across the short side — so a cell is
+                // three to five of these across and a whole word far more, which is why this range
+                // sits an order of magnitude above the others. Sizing the dot rather than the cell
+                // is what keeps dots the same size whether a cell is two columns or three.
+                //
+                // The finest of the four fragment kinds even so, because writing read at a
+                // distance is texture, and a glyph large enough to be studied invites being read.
+                const GLYPH_DOT_PER_SCREEN_RANGE: RangeInclusive<f64> = 100.0..=300.0;
 
-                let base_size = min_wh / rng.gen_range(GLYPH_CELL_PER_SCREEN_RANGE);
-                // A cell and the gap beside it are both one `base_size`: an even checker, so no
-                // stroke weight is implied and the grid reads as a matrix display rather than as
-                // letterforms with a thickness.
-                let cell_size = base_size as f32;
-                let cell_gap = base_size as f32;
-                let grid_gap = cell_gap * rng.gen_range(GRID_GAP_RATIO_RANGE);
-                let grid_width = glyph_cell.cols as f32 * (cell_size + cell_gap) - cell_gap;
+                let base_size = min_wh / rng.gen_range(GLYPH_DOT_PER_SCREEN_RANGE);
                 let left_upper = ref_point(
                     rng,
                     RefPointKind::LeftUpper,
-                    glyph_cell.filled.len() as f32 * (grid_width + grid_gap) - grid_gap,
-                    glyph_cell.rows as f32 * (cell_size + cell_gap) - cell_gap,
+                    (glyph_word.width() * base_size) as f32,
+                    (glyph_word.height() * base_size) as f32,
                 );
-                for (i_grid, grid) in glyph_cell.filled.iter().enumerate() {
-                    for (j_cell, cell_filled) in grid.iter().enumerate() {
-                        if !*cell_filled {
-                            continue;
-                        };
-                        pixmap.fill_rect(
-                            Rect::from_xywh(
-                                left_upper.x
-                                    + (grid_width + grid_gap) * i_grid as f32
-                                    + (j_cell % glyph_cell.cols) as f32 * (cell_size + cell_gap),
-                                left_upper.y
-                                    + (j_cell / glyph_cell.cols) as f32 * (cell_size + cell_gap),
-                                cell_size,
-                                cell_size,
-                            )
-                            .unwrap(),
-                            &paint,
-                            Transform::identity(),
-                            None,
-                        );
-                    }
+                for (x, y, dot_size) in glyph_word.dots() {
+                    pixmap.fill_rect(
+                        Rect::from_xywh(
+                            left_upper.x + (x * base_size) as f32,
+                            left_upper.y + (y * base_size) as f32,
+                            (dot_size * base_size) as f32,
+                            (dot_size * base_size) as f32,
+                        )
+                        .unwrap(),
+                        &paint,
+                        Transform::identity(),
+                        None,
+                    );
                 }
             }
             2 => {
@@ -690,14 +663,9 @@ pub fn render_dreamcore<R: Rng>(
                             None,
                         );
                     }
-                    IconShape::DiagonalPair { angle } => {
-                        // Half the angle between the pair's two strokes, as a fraction of a full
-                        // turn. Away from zero so the two never coincide into a single line, and
-                        // well under a quarter turn so they never square up into a cross — which
-                        // is the neighboring variant, and a sign in its own right.
-                        const OPEN_ANGLE_RATIO_RANGE: RangeInclusive<f32> = 1.0 / 16.0..=1.0 / 8.0;
+                    IconShape::DiagonalPair { angle, open_angle } => {
                         let angle = angle as f32;
-                        let open_angle = rng.gen_range(OPEN_ANGLE_RATIO_RANGE) * TAU;
+                        let open_angle = open_angle as f32;
                         let mut pb = PathBuilder::new();
                         pb.move_to(
                             center.x + radius * (angle + open_angle).cos(),
@@ -775,115 +743,33 @@ pub fn render_dreamcore<R: Rng>(
                 }
             }
             _ => {
-                // Cells in one readout. Long enough to look like a reading rather than a mark,
-                // short enough that a viewer does not start looking for a pattern in it.
-                const DIGITS_LENGTH_RANGE: RangeInclusive<usize> = 1..=10;
-                let digits = digits(rng.gen_range(DIGITS_LENGTH_RANGE), rng);
+                let digits = digits(rng);
 
                 // Width of one cell, as how many would fit across the short side. Between the
                 // icons and the glyphs: a readout is meant to be legible as a display, which a
                 // glyph is not, without being the subject, which an icon is.
                 const DIGIT_PER_SCREEN_RANGE: RangeInclusive<f64> = 10.0..=30.0;
-                // Segment thickness, against the cell's *width* rather than its height, so the
-                // three horizontal bars keep their weight while the aspect below stretches the
-                // vertical ones. The span covers a thin LCD through a chunky LED.
-                const THICKNESS_RATIO_RANGE: RangeInclusive<f32> = 0.14..=0.28;
-                // Space between cells, against a cell's width. Reaching zero would run the readout
-                // into one block; a full cell width is where it stops being one readout.
-                const DIGIT_GAP_RATIO_RANGE: RangeInclusive<f32> = 0.1..=1.0;
-                let digit_width = (min_wh / rng.gen_range(DIGIT_PER_SCREEN_RANGE)) as f32;
-                // Twice as tall as wide, fixed rather than drawn: it is what makes a seven-segment
-                // cell read as one, the two stacked squares the layout is built from.
-                let digit_height = digit_width * 2.0;
-                let thickness = rng.gen_range(THICKNESS_RATIO_RANGE) * digit_width;
-                let digit_gap = digit_width * rng.gen_range(DIGIT_GAP_RATIO_RANGE);
+
+                let base_size = min_wh / rng.gen_range(DIGIT_PER_SCREEN_RANGE);
                 let left_upper = ref_point(
                     rng,
                     RefPointKind::LeftUpper,
-                    (digit_width + digit_gap) * digits.cells.len() as f32 - digit_gap,
-                    digit_height,
+                    (digits.width() * base_size) as f32,
+                    (digits.height() * base_size) as f32,
                 );
-                for (i_cell, cell) in digits.cells.iter().enumerate() {
-                    for (j_segment, segment) in cell.segments.iter().enumerate() {
-                        if !segment {
-                            continue;
-                        }
-                        let cell_left_upper = Point::from_xy(
-                            left_upper.x + i_cell as f32 * (digit_width + digit_gap),
-                            left_upper.y,
-                        );
-                        pixmap.fill_rect(
-                            match j_segment {
-                                0 => {
-                                    // a
-                                    Rect::from_xywh(
-                                        cell_left_upper.x,
-                                        cell_left_upper.y,
-                                        digit_width,
-                                        thickness,
-                                    )
-                                }
-                                1 => {
-                                    // b
-                                    Rect::from_xywh(
-                                        cell_left_upper.x + digit_width - thickness,
-                                        cell_left_upper.y,
-                                        thickness,
-                                        digit_height / 2.0,
-                                    )
-                                }
-                                2 => {
-                                    // c
-                                    Rect::from_xywh(
-                                        cell_left_upper.x + digit_width - thickness,
-                                        cell_left_upper.y + digit_height / 2.0,
-                                        thickness,
-                                        digit_height / 2.0,
-                                    )
-                                }
-                                3 => {
-                                    // d
-                                    Rect::from_xywh(
-                                        cell_left_upper.x,
-                                        cell_left_upper.y + digit_height - thickness,
-                                        digit_width,
-                                        thickness,
-                                    )
-                                }
-                                4 => {
-                                    // e
-                                    Rect::from_xywh(
-                                        cell_left_upper.x,
-                                        cell_left_upper.y + digit_height / 2.0,
-                                        thickness,
-                                        digit_height / 2.0,
-                                    )
-                                }
-                                5 => {
-                                    // f
-                                    Rect::from_xywh(
-                                        cell_left_upper.x,
-                                        cell_left_upper.y,
-                                        thickness,
-                                        digit_height / 2.0,
-                                    )
-                                }
-                                _ => {
-                                    // g
-                                    Rect::from_xywh(
-                                        cell_left_upper.x,
-                                        cell_left_upper.y + digit_height / 2.0 - thickness / 2.0,
-                                        digit_width,
-                                        thickness,
-                                    )
-                                }
-                            }
-                            .unwrap(),
-                            &paint,
-                            Transform::identity(),
-                            None,
-                        );
-                    }
+                for (x, y, w, h) in digits.segments() {
+                    pixmap.fill_rect(
+                        Rect::from_xywh(
+                            left_upper.x + (x * base_size) as f32,
+                            left_upper.y + (y * base_size) as f32,
+                            (w * base_size) as f32,
+                            (h * base_size) as f32,
+                        )
+                        .unwrap(),
+                        &paint,
+                        Transform::identity(),
+                        None,
+                    );
                 }
             }
         }
@@ -897,6 +783,65 @@ mod tests {
 
     /// Short sides worth covering, from a small window to 8K.
     const SHORT_SIDES: [f64; 7] = [240.0, 480.0, 720.0, 1080.0, 1440.0, 2160.0, 4320.0];
+
+    /// Distinguishable slots, so a drawn pixel can never coincide with the background.
+    const TEST_PALETTE: &str = r#"
+colors:
+  base00: "000000"
+  base01: "111111"
+  base02: "222222"
+  base03: "333333"
+  base04: "444444"
+  base05: "555555"
+  base06: "666666"
+  base07: "777777"
+  base08: "ff0000"
+  base09: "ff8800"
+  base0A: "ffff00"
+  base0B: "00ff00"
+  base0C: "00ffff"
+  base0D: "0000ff"
+  base0E: "ff00ff"
+  base0F: "ff88ff"
+"#;
+
+    /// Every fragment kind still puts marks on the canvas.
+    ///
+    /// Nothing else here would notice if one stopped. The kinds are picked internally, so a test
+    /// cannot ask for one; but a render of a single fragment is one kind's work alone, and if a
+    /// kind draws nothing then roughly a quarter of such renders come back as bare background.
+    /// A few are bare anyway — `ref_point` may hang a fragment almost entirely off the frame, and
+    /// what stays inside can land in a gap between its marks — so the bound is a rate rather than
+    /// zero, set at half of what losing one kind would produce.
+    ///
+    /// This is what a `digits` arm that built its rectangles and dropped them on the floor got
+    /// past: it compiled, it left every other test green, and the readouts were simply gone.
+    #[test]
+    fn no_fragment_kind_quietly_stops_drawing() {
+        const RENDERS: usize = 240;
+        const A_QUARTER_OF_THEM: usize = RENDERS / 4;
+
+        let palette = Palette::parse(TEST_PALETTE).expect("test palette should parse");
+        let background = palette.base00;
+
+        let bare = (0..RENDERS)
+            .filter(|seed| {
+                use rand::SeedableRng;
+                let mut rng = rand::rngs::StdRng::seed_from_u64(*seed as u64);
+                let pixmap = render_dreamcore(&palette, 320, 180, 1, &mut rng);
+                pixmap.pixels().iter().all(|pixel| {
+                    (pixel.red(), pixel.green(), pixel.blue())
+                        == (background.0, background.1, background.2)
+                })
+            })
+            .count();
+
+        assert!(
+            bare * 2 < A_QUARTER_OF_THEM,
+            "{bare} of {RENDERS} single-fragment renders drew nothing, which is the rate a whole \
+             kind drawing nothing would produce"
+        );
+    }
 
     /// Size of one lattice cell of `octave`, in pixels — the quantity both ends of `octave_range`
     /// are stated in.
