@@ -201,7 +201,7 @@ impl GlyphWord {
 pub enum IconShape {
     RingFragment { start_angle: f64, sweep: f64 },
     Cross,
-    DiagonalPair { angle: f64, open_angle: f64 },
+    ParallelChords { angle: f64, chord_length: f64 },
 }
 
 /// One pseudo-pictogram fragment — ring-fragment, cross, or diagonal-pair — that never resolves
@@ -216,22 +216,33 @@ pub fn icon_shape(rng: &mut impl Rng) -> IconShape {
             sweep: rng.gen_range(0.0..IconShape::MAX_SWEEP_RATIO * TAU),
         },
         1 => IconShape::Cross,
-        _ => IconShape::DiagonalPair {
+        _ => IconShape::ParallelChords {
             angle: rng.gen_range(0.0..TAU),
-            open_angle: rng.gen_range(IconShape::OPEN_ANGLE_RATIO_RANGE) * TAU,
+            chord_length: rng.gen_range(IconShape::length_range()),
         },
     }
 }
 
 impl IconShape {
-    /// Half the angle between the pair's two strokes, as a fraction of a full
-    /// turn. Away from zero so the two never coincide into a single line, and
-    /// well under a quarter turn so they never square up into a cross — which
-    /// is the neighboring variant, and a sign in its own right.
-    const OPEN_ANGLE_RATIO_RANGE: RangeInclusive<f64> = 1.0 / 16.0..=1.0 / 8.0;
     /// The largest fraction of a full turn a `RingFragment` may sweep. Under 1 so the arc always
     /// leaves a visible gap and never closes into a real ring.
     const MAX_SWEEP_RATIO: f64 = 0.95;
+
+    fn length_range() -> RangeInclusive<f64> {
+        2.0 * (1.0 / 8.0 * TAU).cos()..=2.0 * (1.0 / 16.0 * TAU).cos()
+    }
+
+    pub fn cross_edges() -> [(f64, f64); 2] {
+        [(0.0, TAU / 2.0), (TAU / 4.0, 3.0 * TAU / 4.0)]
+    }
+
+    pub fn chords(angle: f64, chord_length: f64) -> [(f64, f64); 2] {
+        let theta = (chord_length / 2.0).acos();
+        [
+            (angle + theta, angle + TAU / 2.0 - theta),
+            (angle - theta, angle - TAU / 2.0 + theta),
+        ]
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -595,6 +606,82 @@ mod tests {
             }
         }
         assert!(saw_ring_fragment, "500 draws never produced a RingFragment");
+    }
+
+    /// `chords` hands back angles and `render` turns them into points on a circle of some radius,
+    /// so the length actually drawn is never stated anywhere — it falls out of the trigonometry.
+    /// Which is how the two halves of this once disagreed by a factor of two: `chord_length` was a
+    /// multiple of the radius on one side of the file and of the diameter on the other, and since
+    /// the standard chord relation carries a two either way, both spellings looked right.
+    ///
+    /// Drawn on the unit circle so a radius of one makes the reported length directly comparable.
+    #[test]
+    fn a_chord_comes_out_the_length_it_was_asked_for() {
+        let mut rng = StdRng::seed_from_u64(13);
+        let mut saw_chords = false;
+        for _ in 0..500 {
+            let IconShape::ParallelChords {
+                angle,
+                chord_length,
+            } = icon_shape(&mut rng)
+            else {
+                continue;
+            };
+            saw_chords = true;
+
+            for (start, end) in IconShape::chords(angle, chord_length) {
+                let drawn = (end.cos() - start.cos()).hypot(end.sin() - start.sin());
+                assert!(
+                    (drawn - chord_length).abs() < 1e-9,
+                    "asked for {chord_length} and drew {drawn}"
+                );
+            }
+        }
+        assert!(saw_chords, "500 draws never produced a ParallelChords");
+    }
+
+    /// The pair is two parallel chords either side of the centre, which is what the variant is
+    /// named for. Nothing in the construction says so — it comes out of the two chords being
+    /// mirror images about the axis through `angle` — and an earlier comment claimed instead that
+    /// a wide enough opening would square them into a cross, which cannot happen at any value.
+    #[test]
+    fn the_two_chords_are_parallel_and_straddle_the_centre() {
+        let mut rng = StdRng::seed_from_u64(14);
+        for _ in 0..500 {
+            let IconShape::ParallelChords {
+                angle,
+                chord_length,
+            } = icon_shape(&mut rng)
+            else {
+                continue;
+            };
+
+            let [first, second] = IconShape::chords(angle, chord_length).map(|(start, end)| {
+                let (from, to) = ((start.cos(), start.sin()), (end.cos(), end.sin()));
+                let heading = (to.1 - from.1).atan2(to.0 - from.0).rem_euclid(TAU / 2.0);
+                // Signed distance from the centre, positive on one side of the chord's line and
+                // negative on the other, so a pair that straddles the centre sums to zero.
+                let offset = ((to.0 - from.0) * from.1 - from.0 * (to.1 - from.1)) / chord_length;
+                (heading, offset)
+            });
+
+            assert!(
+                (first.0 - second.0).abs() < 1e-9,
+                "chords head {} and {} degrees apart",
+                first.0.to_degrees(),
+                second.0.to_degrees()
+            );
+            assert!(
+                (first.1 + second.1).abs() < 1e-9,
+                "chords sit {} and {} from the centre rather than either side of it",
+                first.1,
+                second.1
+            );
+            assert!(
+                first.1.abs() > 1e-9,
+                "the chords have collapsed onto one line through the centre"
+            );
+        }
     }
 
     #[test]
