@@ -6,13 +6,17 @@
 //!   - `glyph_word`: no cell may come out with every dot unset (an empty box reads as "nothing",
 //!     not as "unreadable writing").
 //!   - `icon_shape`: a `RingFragment` must never sweep a full circle — that completes into a real
-//!     ring, the same "resolves into one whole shape" failure as a level pair of eyes.
+//!     ring, the same "resolves into one whole shape" failure as a level pair of eyes. This one has
+//!     since stopped needing a check at all: `Sweep` makes it unrepresentable.
 //!   - `digits`: each cell's segment pattern must never match a real digit 0-9 — it should
 //!     read as a broken display, not an actual number.
 
 use std::{f64::consts::TAU, ops::RangeInclusive};
 
-use rand::Rng;
+use rand::{
+    distributions::{Distribution, Standard},
+    Rng,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EyeMarks {
@@ -197,50 +201,94 @@ impl GlyphWord {
     }
 }
 
+/// An angle in radians. The type carries no range: angles are periodic, so a value outside
+/// `0.0..TAU` is as valid as one inside. `Standard` drawing from a full turn is that
+/// distribution's support, not a constraint on the type.
+///
+/// A newtype rather than a bare `f64` so an angle cannot be swapped for a length stored beside it,
+/// and so the full-turn draw has one home.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum IconShape {
-    RingFragment { start_angle: f64, sweep: f64 },
-    Cross,
-    ParallelChords { angle: f64, chord_length: f64 },
+pub struct Angle(f64);
+
+impl Angle {
+    pub fn radians(self) -> f64 {
+        self.0
+    }
+}
+impl Distribution<Angle> for Standard {
+    fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> Angle {
+        Angle(rng.gen_range(0.0..TAU))
+    }
 }
 
-/// One pseudo-pictogram fragment — ring-fragment, cross, or diagonal-pair — that never resolves
+/// An angular interval in radians: an amount turned rather than a direction.
+///
+/// Unlike `Angle`, the range here is an invariant and not merely a distribution's support. The
+/// field is private and `Standard` is the only constructor, so every `Sweep` that exists is under a
+/// full turn — an arc closing into a whole ring is unrepresentable rather than merely untested.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Sweep(f64);
+
+impl Sweep {
+    /// The largest fraction of a full turn a sweep may cover. Under 1 is what keeps the arc from
+    /// closing into a real ring; how far under is a judgment about when the remaining gap stops
+    /// reading as a gap, and no assertion against this constant can check that half.
+    const MAX_RATIO: f64 = 0.95;
+
+    pub fn radians(self) -> f64 {
+        self.0
+    }
+}
+impl Distribution<Sweep> for Standard {
+    fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> Sweep {
+        Sweep(rng.gen_range(0.0..Sweep::MAX_RATIO * TAU))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum IconShape {
+    RingFragment { start_angle: Angle, sweep: Sweep },
+    Cross,
+    ParallelChords { angle: Angle, chord_length: f64 },
+}
+
+/// One pseudo-pictogram fragment — ring fragment, cross, or parallel chords — that never resolves
 /// into an actual sign. (`Arrow` was dropped: unlike the others, a directional arrow reads as a
 /// real, functional sign — the same "single element resolves the whole scene" failure as the
-/// literal door and the leveled eyes.) In particular a `RingFragment`'s `sweep` must never reach
-/// a full circle (that would complete into a real ring, a "resolved" whole shape).
+/// literal door and the leveled eyes.) The one constraint that used to be stated here, that a
+/// `RingFragment` never reaches a full circle, is now carried by `Sweep`.
 pub fn icon_shape(rng: &mut impl Rng) -> IconShape {
     match rng.gen_range(0..3) {
         0 => IconShape::RingFragment {
-            start_angle: rng.gen_range(0.0..TAU),
-            sweep: rng.gen_range(0.0..IconShape::MAX_SWEEP_RATIO * TAU),
+            start_angle: rng.gen(),
+            sweep: rng.gen(),
         },
         1 => IconShape::Cross,
         _ => IconShape::ParallelChords {
-            angle: rng.gen_range(0.0..TAU),
+            angle: rng.gen(),
             chord_length: rng.gen_range(IconShape::length_range()),
         },
     }
 }
 
 impl IconShape {
-    /// The largest fraction of a full turn a `RingFragment` may sweep. Under 1 so the arc always
-    /// leaves a visible gap and never closes into a real ring.
-    const MAX_SWEEP_RATIO: f64 = 0.95;
-
     fn length_range() -> RangeInclusive<f64> {
         2.0 * (1.0 / 8.0 * TAU).cos()..=2.0 * (1.0 / 16.0 * TAU).cos()
     }
 
-    pub fn cross_edges() -> [(f64, f64); 2] {
-        [(0.0, TAU / 2.0), (TAU / 4.0, 3.0 * TAU / 4.0)]
+    pub fn cross_edges() -> [(Angle, Angle); 2] {
+        [
+            (Angle(0.0), Angle(TAU / 2.0)),
+            (Angle(TAU / 4.0), Angle(3.0 * TAU / 4.0)),
+        ]
     }
 
-    pub fn chords(angle: f64, chord_length: f64) -> [(f64, f64); 2] {
+    pub fn chords(angle: Angle, chord_length: f64) -> [(Angle, Angle); 2] {
+        let angle = angle.radians();
         let theta = (chord_length / 2.0).acos();
         [
-            (angle + theta, angle + TAU / 2.0 - theta),
-            (angle - theta, angle - TAU / 2.0 + theta),
+            (Angle(angle + theta), Angle(angle + TAU / 2.0 - theta)),
+            (Angle(angle - theta), Angle(angle - TAU / 2.0 + theta)),
         ]
     }
 }
@@ -598,9 +646,10 @@ mod tests {
         let mut saw_ring_fragment = false;
         for _ in 0..500 {
             if let IconShape::RingFragment { sweep, .. } = icon_shape(&mut rng) {
+                let sweep = sweep.radians();
                 saw_ring_fragment = true;
                 assert!(
-                    sweep < IconShape::MAX_SWEEP_RATIO * TAU,
+                    sweep < Sweep::MAX_RATIO * TAU,
                     "ring fragment sweep {sweep} too close to a full circle"
                 );
             }
@@ -630,6 +679,8 @@ mod tests {
             saw_chords = true;
 
             for (start, end) in IconShape::chords(angle, chord_length) {
+                let start = start.radians();
+                let end = end.radians();
                 let drawn = (end.cos() - start.cos()).hypot(end.sin() - start.sin());
                 assert!(
                     (drawn - chord_length).abs() < 1e-9,
@@ -657,6 +708,8 @@ mod tests {
             };
 
             let [first, second] = IconShape::chords(angle, chord_length).map(|(start, end)| {
+                let start = start.radians();
+                let end = end.radians();
                 let (from, to) = ((start.cos(), start.sin()), (end.cos(), end.sin()));
                 let heading = (to.1 - from.1).atan2(to.0 - from.0).rem_euclid(TAU / 2.0);
                 // Signed distance from the centre, positive on one side of the chord's line and

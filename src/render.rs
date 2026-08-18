@@ -643,6 +643,8 @@ pub fn render_dreamcore<R: Rng>(
                 match icon_shape {
                     IconShape::Cross => {
                         for (start_angle, end_angle) in IconShape::cross_edges() {
+                            let start_angle = start_angle.radians();
+                            let end_angle = end_angle.radians();
                             let mut pb = PathBuilder::new();
                             pb.move_to(
                                 center.x + radius * start_angle.cos() as f32,
@@ -666,6 +668,8 @@ pub fn render_dreamcore<R: Rng>(
                         chord_length,
                     } => {
                         for (start_angle, end_angle) in IconShape::chords(angle, chord_length) {
+                            let start_angle = start_angle.radians();
+                            let end_angle = end_angle.radians();
                             let mut pb = PathBuilder::new();
                             pb.move_to(
                                 center.x + radius * start_angle.cos() as f32,
@@ -685,8 +689,8 @@ pub fn render_dreamcore<R: Rng>(
                         }
                     }
                     IconShape::RingFragment { start_angle, sweep } => {
-                        let start_angle = start_angle as f32;
-                        let sweep = sweep as f32;
+                        let start_angle = start_angle.radians() as f32;
+                        let sweep = sweep.radians() as f32;
 
                         // The arc reaches tiny-skia as cubics because its path API has no arc, and
                         // turning a curve into something a rasterizer can fill is the rasterizer's
