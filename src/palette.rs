@@ -9,22 +9,22 @@ pub struct Rgb(pub u8, pub u8, pub u8);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PaletteFields)]
 pub struct Palette {
-    pub base00: Rgb,
-    pub base01: Rgb,
-    pub base02: Rgb,
-    pub base03: Rgb,
-    pub base04: Rgb,
-    pub base05: Rgb,
-    pub base06: Rgb,
-    pub base07: Rgb,
-    pub base08: Rgb,
-    pub base09: Rgb,
-    pub base0a: Rgb,
-    pub base0b: Rgb,
-    pub base0c: Rgb,
-    pub base0d: Rgb,
-    pub base0e: Rgb,
-    pub base0f: Rgb,
+    base00: Rgb,
+    base01: Rgb,
+    base02: Rgb,
+    base03: Rgb,
+    base04: Rgb,
+    base05: Rgb,
+    base06: Rgb,
+    base07: Rgb,
+    base08: Rgb,
+    base09: Rgb,
+    base0a: Rgb,
+    base0b: Rgb,
+    base0c: Rgb,
+    base0d: Rgb,
+    base0e: Rgb,
+    base0f: Rgb,
 }
 
 impl Palette {
@@ -57,6 +57,36 @@ impl Palette {
             );
         }
         Palette::from_colors(colors)
+    }
+
+    /// `base00` — the shade of a place nothing has been drawn.
+    pub fn background(&self) -> Rgb {
+        self.base00
+    }
+
+    /// `base01`–`base02` — a shade off the background, near enough to read as ground rather than as
+    /// a mark. What a wash or a fill is allowed to be.
+    pub fn surfaces(&self) -> [Rgb; 2] {
+        [self.base01, self.base02]
+    }
+
+    /// `base08`–`base0f` — the saturated hues, the ones that read as a mark against `background`.
+    /// The eight below them are a greyscale ramp and do not, which is the whole content of the
+    /// boundary: these are the colors a renderer may draw *with*.
+    ///
+    /// Order is declaration order and means nothing. There is no first accent and no last one —
+    /// pick with `choose`, never by index.
+    pub fn accents(&self) -> [Rgb; 8] {
+        [
+            self.base08,
+            self.base09,
+            self.base0a,
+            self.base0b,
+            self.base0c,
+            self.base0d,
+            self.base0e,
+            self.base0f,
+        ]
     }
 }
 
@@ -102,13 +132,23 @@ colors:
         assert_eq!(p.base0a, Rgb(0xe5, 0xc0, 0x7b));
     }
 
+    /// Two mechanisms have to agree about where base16 puts things, and neither can check itself.
+    /// `all` is generated from field declaration order; the roles name their slots by hand. A role
+    /// that reaches for the wrong slot, or a field order that stops matching the scheme, shows up
+    /// only as the two disagreeing — the endpoints of `all` survive any reordering of the middle,
+    /// and the roles look right in isolation whatever they name.
+    ///
+    /// This leans on the sixteen colors being distinct, which they are in a real base16 scheme:
+    /// equal ones would let a wrong slot pass.
     #[test]
-    fn all_returns_exactly_16_colors_in_base00_to_base0f_order() {
+    fn the_roles_pick_out_the_base16_slots_they_claim() {
         let p = Palette::parse(REAL_COLORS_YAML).unwrap();
         let all = p.all();
+
         assert_eq!(all.len(), 16);
-        assert_eq!(all[0], p.base00);
-        assert_eq!(all[15], p.base0f);
+        assert_eq!(all[0], p.background());
+        assert_eq!(all[1..3], p.surfaces());
+        assert_eq!(all[8..], p.accents());
     }
 
     #[test]
