@@ -20,8 +20,10 @@ use std::{
 
 use rand::{
     distributions::{Distribution, Standard},
+    seq::SliceRandom,
     Rng,
 };
+use strum::{EnumDiscriminants, VariantArray};
 
 /// Two small marks suggesting a gaze. Deliberately asymmetric: unequal size and never level, so
 /// they never complete into a face. Both halves hold by construction — "never level" because
@@ -295,12 +297,13 @@ impl Distribution<Sweep> for Standard {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
 /// One pseudo-pictogram fragment — ring fragment, cross, or parallel chords — that never resolves
 /// into an actual sign. (`Arrow` was dropped: unlike the others, a directional arrow reads as a
 /// real, functional sign — the same "single element resolves the whole scene" failure as the
 /// literal door and the leveled eyes.) The one constraint that used to be stated here, that a
 /// `RingFragment` never reaches a full circle, is now carried by `Sweep`.
+#[derive(Debug, Clone, Copy, PartialEq, EnumDiscriminants)]
+#[strum_discriminants(name(IconShapeKind), derive(VariantArray))]
 pub enum IconShape {
     RingFragment { start_angle: Angle, sweep: Sweep },
     Cross,
@@ -309,13 +312,13 @@ pub enum IconShape {
 
 impl IconShape {
     pub fn sample(rng: &mut impl Rng) -> Self {
-        match rng.gen_range(0..3) {
-            0 => Self::RingFragment {
+        match IconShapeKind::VARIANTS.choose(rng).unwrap() {
+            IconShapeKind::RingFragment => Self::RingFragment {
                 start_angle: rng.gen(),
                 sweep: rng.gen(),
             },
-            1 => Self::Cross,
-            _ => Self::ParallelChords {
+            IconShapeKind::Cross => Self::Cross,
+            IconShapeKind::ParallelChords => Self::ParallelChords {
                 angle: rng.gen(),
                 chord_length: rng.gen_range(Self::length_range()),
             },
