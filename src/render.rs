@@ -57,9 +57,12 @@ pub fn render_flow(
 
     let min_wh = width.min(height) as f64;
 
-    let wash_color = *[palette.base01, palette.base02]
+    let background_color = palette.background();
+    let wash_color = *palette
+        .surfaces()
         .choose(rng)
         .expect("wash_color cannot be empty");
+
     // The wash gets its own feature scale, in the same unit as the streamlines' — how many
     // features fit across the short side — so the two are directly comparable: the streamline
     // field fits at most one feature across the frame, where the wash starts at one and runs all
@@ -125,11 +128,11 @@ pub fn render_flow(
                 wash_octaves,
             )) / 2.0;
         *pixel = Color::from_rgba8(
-            ((1.0 - warped_potential) * palette.base00.0 as f64
+            ((1.0 - warped_potential) * background_color.0 as f64
                 + warped_potential * wash_color.0 as f64) as u8,
-            ((1.0 - warped_potential) * palette.base00.1 as f64
+            ((1.0 - warped_potential) * background_color.1 as f64
                 + warped_potential * wash_color.1 as f64) as u8,
-            ((1.0 - warped_potential) * palette.base00.2 as f64
+            ((1.0 - warped_potential) * background_color.2 as f64
                 + warped_potential * wash_color.2 as f64) as u8,
             255,
         )
@@ -521,7 +524,7 @@ pub fn render_dreamcore<R: Rng>(
 ) -> Pixmap {
     let mut pixmap = Pixmap::new(width, height).unwrap();
 
-    pixmap.fill(to_color(palette.base00));
+    pixmap.fill(to_color(palette.background()));
 
     // Where to put one fragment, given the size of the smallest rectangle that encloses everything
     // it draws. Both kinds place that rectangle, not any one mark inside it: `LeftUpper` returns
@@ -814,7 +817,7 @@ colors:
         const A_QUARTER_OF_THEM: usize = RENDERS / 4;
 
         let palette = Palette::parse(TEST_PALETTE).expect("test palette should parse");
-        let background = palette.base00;
+        let background = palette.background();
 
         let bare = (0..RENDERS)
             .filter(|seed| {
