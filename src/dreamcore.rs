@@ -3,85 +3,180 @@
 //! a PNG:
 //!   - `eyes`: must never present as a level, equal-size pair — that reads as a face, which is
 //!     the exact "single element resolves the whole scene" failure this project already hit once.
+//!     Neither half needs a check any more: `DY_RATIO_RANGE` and `SMALLER_SIZE_RANGE` between them
+//!     make such a pair unrepresentable.
 //!   - `glyph_word`: no cell may come out with every dot unset (an empty box reads as "nothing",
 //!     not as "unreadable writing").
 //!   - `icon_shape`: a `RingFragment` must never sweep a full circle — that completes into a real
-//!     ring, the same "resolves into one whole shape" failure as a level pair of eyes.
+//!     ring, the same "resolves into one whole shape" failure as a level pair of eyes. This one has
+//!     since stopped needing a check at all: `Sweep` makes it unrepresentable.
 //!   - `digits`: each cell's segment pattern must never match a real digit 0-9 — it should
 //!     read as a broken display, not an actual number.
 
-use std::{f64::consts::TAU, ops::RangeInclusive};
+use std::{
+    f64::consts::TAU,
+    ops::{Range, RangeInclusive},
+};
 
-use rand::Rng;
+use rand::{
+    distributions::{Distribution, Standard},
+    seq::SliceRandom,
+    Rng,
+};
+use strum::{EnumDiscriminants, VariantArray};
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct EyeMarks {
-    size_a: f64,
-    size_b: f64,
-    gap: f64,
-    dy: f64, // vertical offset between the two marks — nonzero means "not level"
+/// The vocabulary of things that can be scattered across a Dreamcore canvas — one variant per kind,
+/// each carrying the shape its own type describes and nothing about where it lands.
+///
+/// This is the whole of what `render` may draw. It consumes a `Fragment` by matching on it, so the
+/// two halves cannot drift: adding a variant here stops both this module's construction and that
+/// module's drawing from compiling until each has an arm.
+///
+/// What stays a judgment is whether a new generator should become a variant at all. Not every shape
+/// this module can make has to be scatterable, and nothing here can decide that — but once the
+/// variant exists, both ends of it are the compiler's to enforce.
+///
+/// `FragmentKind` is the fieldless mirror `sample` draws from. It exists only because a variant with
+/// a payload cannot serve as its own selector; `render` never needs it.
+#[derive(EnumDiscriminants)]
+#[strum_discriminants(name(FragmentKind), derive(VariantArray))]
+pub enum Fragment {
+    Eyes(EyeMarks),
+    GlyphWord(GlyphWord),
+    Icon(IconShape),
+    Digits(Digits),
 }
 
-/// Two small marks suggesting a gaze, sized relative to `base_size`. Deliberately asymmetric:
-/// unequal size and never level, so they never complete into a face.
-///
-/// "Never level" holds by construction, since `DY_RANGE` excludes zero. "Unequal size" does not:
-/// the two sizes are independent draws from one range and can coincide. The test for it asserts a
-/// property of the draw rather than of the design, and #3 is where that is made structural.
-pub fn eyes(rng: &mut impl Rng) -> EyeMarks {
-    let size_a = rng.gen_range(EyeMarks::EYE_SIZE_RANGE);
-    let size_b = rng.gen_range(EyeMarks::EYE_SIZE_RANGE);
-    let offset = rng.gen_range(EyeMarks::DY_RANGE);
-
-    EyeMarks {
-        size_a,
-        size_b,
-        gap: size_a.max(size_b) * rng.gen_range(EyeMarks::GAP_RANGE),
-        dy: if rng.gen() { -offset } else { offset },
+impl Fragment {
+    /// Every kind is equally likely. Which arm builds which variant is not checked by anything —
+    /// the exhaustiveness is over the kind, not over the correspondence.
+    pub fn sample(rng: &mut impl Rng) -> Self {
+        match FragmentKind::VARIANTS.choose(rng).unwrap() {
+            FragmentKind::Eyes => Self::Eyes(EyeMarks::sample(rng)),
+            FragmentKind::GlyphWord => Self::GlyphWord(GlyphWord::sample(rng)),
+            FragmentKind::Icon => Self::Icon(IconShape::sample(rng)),
+            FragmentKind::Digits => Self::Digits(Digits::sample(rng)),
+        }
     }
+}
+
+/// Two small marks suggesting a gaze. Deliberately asymmetric: unequal size and never level, so
+/// they never complete into a face. Both halves hold by construction — "never level" because
+/// `DY_RATIO_RANGE` excludes zero, "unequal size" because `SMALLER_SIZE_RANGE` is half-open below
+/// one — so a pair of equal or level marks is not a thing this type can hold, rather than one a
+/// test happens not to have seen.
+///
+/// Every length here is in widths of the bigger mark, that mark being one by definition, so nothing
+/// in this type is in pixels. `render` multiplies by whatever the bigger mark is worth on its
+/// canvas. Only the smaller mark's size is stored, since the bigger one is the unit.
+///
+/// The pair is described by which mark is on top rather than by which is on the left, because that
+/// is the axis the constraint lives on: how far the lower mark may drop is bounded by the upper
+/// one's height. Left and right are then a free choice, made by `is_upper_left` and used only for
+/// layout.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EyeMarks {
+    is_upper_smaller: bool,
+    is_upper_left: bool,
+    smaller_size: f64,
+    gap: f64,
+    /// How far the lower mark sits below the upper one, as a fraction of the upper one — a ratio
+    /// rather than a length, which is why it is the one field not in bigger-mark widths. `dy`
+    /// converts.
+    dy_ratio: f64,
 }
 
 impl EyeMarks {
-    /// How large each mark is against `base_size`. Drawn twice and independently, which is where the
-    /// pair's size asymmetry comes from — and also why the asymmetry is only likely rather than
-    /// certain. #3 replaces this with a ratio between the two marks.
-    const EYE_SIZE_RANGE: RangeInclusive<f64> = 0.5..=2.0;
-    /// Space between the marks, against the larger of the two — the pair reads as a gaze rather than
-    /// as two unrelated dots only while the gap stays in scale with what it separates.
+    /// The unit everything else is measured in, so one by definition.
+    const BIGGER_EYE_SIZE: f64 = 1.0;
+    /// The other mark, as a fraction of the bigger one. Being a `Range` rather than a
+    /// `RangeInclusive` is what carries "unequal size": the excluded upper end is the whole
+    /// enforcement, so widening this to `..=1.0` would quietly give the pair back its face. How far
+    /// below one the range starts is the separate, aesthetic half — the point at which the
+    /// difference stops being visible — and no assertion reading this constant can check that.
+    const SMALLER_SIZE_RANGE: Range<f64> = 0.5..1.0;
+    /// Space between the marks, in bigger-mark widths — the pair reads as a gaze rather than as two
+    /// unrelated dots only while the gap stays in scale with what it separates.
     const GAP_RANGE: RangeInclusive<f64> = 1.0..=5.0;
-    /// How far out of level the pair sits, against `base_size`. The lower end is what keeps "never
-    /// level" true rather than merely representable: a smaller one would be a level pair drawn with a
-    /// nonzero number in it.
-    const DY_RANGE: RangeInclusive<f64> = 0.25..=1.5;
+    /// How far out of level the pair sits, as a fraction of the upper mark. Both ends carry
+    /// something, and the type of the range is half of it — as with `SMALLER_SIZE_RANGE`.
+    ///
+    /// The excluded upper end is what keeps the two marks overlapping vertically: the lower mark
+    /// drops by less than the upper one's height, so the pair always shares a band and reads as one
+    /// thing. At a ratio of one they would merely touch, and past it they would be two stacked dots.
+    /// The lower end keeps "never level" true rather than merely representable: a smaller one would
+    /// be a level pair drawn with a nonzero number in it.
+    const DY_RATIO_RANGE: Range<f64> = 0.25..1.0;
 
-    /// Total span across, in the same units as `size_a`
+    /// Every field is an independent draw, so nothing here has to happen in a particular order.
+    /// Taking one field's bound from another's value is the shape to avoid: it gives the bound
+    /// somewhere to be computed, and so somewhere to be computed wrongly.
+    pub fn sample(rng: &mut impl Rng) -> Self {
+        Self {
+            is_upper_smaller: rng.gen(),
+            is_upper_left: rng.gen(),
+            smaller_size: Self::BIGGER_EYE_SIZE * rng.gen_range(Self::SMALLER_SIZE_RANGE),
+            gap: Self::BIGGER_EYE_SIZE * rng.gen_range(Self::GAP_RANGE),
+            dy_ratio: rng.gen_range(Self::DY_RATIO_RANGE),
+        }
+    }
+
+    /// The drop from the upper mark to the lower one, in bigger-mark widths — the one place the
+    /// stored ratio is turned into a length in this type's own unit.
+    fn dy(&self) -> f64 {
+        self.dy_ratio * self.upper_size()
+    }
+
+    fn lower_size(&self) -> f64 {
+        if self.is_upper_smaller {
+            Self::BIGGER_EYE_SIZE
+        } else {
+            self.smaller_size
+        }
+    }
+
+    fn upper_size(&self) -> f64 {
+        if self.is_upper_smaller {
+            self.smaller_size
+        } else {
+            Self::BIGGER_EYE_SIZE
+        }
+    }
+
+    /// Total span across, in bigger-mark widths
     pub fn width(&self) -> f64 {
-        self.size_a + self.gap + self.size_b
+        self.smaller_size + self.gap + Self::BIGGER_EYE_SIZE
     }
 
-    /// Total span down, in the same units as `size_a`
+    /// Total span down, in bigger-mark widths
     pub fn height(&self) -> f64 {
-        self.size_a.max(self.dy + self.size_b) + (-self.dy).max(0.0)
+        self.upper_size().max(self.dy() + self.lower_size())
     }
 
-    fn first_top(&self) -> f64 {
-        (-self.dy).max(0.0)
-    }
-
-    /// Each mark as (left, top, size), in the same units as `size_a`, from the pair's own
-    /// top-left corner.
+    /// Each mark as (left, top, size), in bigger-mark widths, from the pair's own top-left corner.
     pub fn marks(&self) -> [(f64, f64, f64); 2] {
-        [
-            (0.0, self.first_top(), self.size_a),
-            (
-                self.size_a + self.gap,
-                self.first_top() + self.dy,
-                self.size_b,
-            ),
-        ]
+        if self.is_upper_left {
+            [
+                (0.0, 0.0, self.upper_size()),
+                (self.upper_size() + self.gap, self.dy(), self.lower_size()),
+            ]
+        } else {
+            [
+                (0.0, self.dy(), self.lower_size()),
+                (self.lower_size() + self.gap, 0.0, self.upper_size()),
+            ]
+        }
     }
 }
 
+/// One asemic word: a row of cells, each a small grid of set and unset dots that reads as written
+/// but resolves to nothing. Every cell in a word shares one `cols` x `rows` shape, the way a
+/// typeface holds its characters to one body.
+///
+/// No cell is ever left with every dot unset — an empty box among filled ones reads as a space, and
+/// a word of nothing but spaces reads as nothing at all. The fields are private and `sample` is the
+/// only way in, so that holds of every `GlyphWord` there is.
+///
 /// Three sizes are in play and each has one name: a **dot** is the smallest square, a **cell** is
 /// one character's grid of them, and a **word** is the row of cells. That is braille's vocabulary,
 /// where a cell is likewise the character rather than the mark, and `Digits` uses `cell` the same
@@ -92,43 +187,12 @@ impl EyeMarks {
 #[derive(Debug, Clone, PartialEq)]
 pub struct GlyphWord {
     /// Space between one cell and the next, in dot widths.
-    pub cell_gap: f64,
+    cell_gap: f64,
     /// Dots across one cell, and down it. Every cell in the word shares them.
-    pub cols: usize,
-    pub rows: usize,
+    cols: usize,
+    rows: usize,
     /// One entry per cell, each `cols * rows` dots in row-major order.
-    pub filled: Vec<Vec<bool>>,
-}
-
-/// One asemic word: a row of cells, each a small grid of set and unset dots that reads as written
-/// but resolves to nothing. Every cell in a word shares one `cols` x `rows` shape, the way a
-/// typeface holds its characters to one body.
-///
-/// No cell is ever left with every dot unset — one is set at random instead — since an empty box
-/// among filled ones reads as a space, and a word of nothing but spaces reads as nothing at all.
-pub fn glyph_word(rng: &mut impl Rng) -> GlyphWord {
-    let cols = rng.gen_range(GlyphWord::COL_RANGE);
-    let rows = rng.gen_range(GlyphWord::ROW_RANGE);
-    let cell_count = rng.gen_range(GlyphWord::GLYPH_WORD_LENGTH_RANGE);
-
-    let mut filled = vec![];
-    for _ in 0..cell_count {
-        let mut cell = vec![false; cols * rows];
-        rng.fill(&mut cell[..]);
-        if cell.iter().all(|f| !*f) {
-            let dot_to_fill = rng.gen_range(0..cell.len());
-            cell[dot_to_fill] = true;
-        }
-
-        filled.push(cell);
-    }
-
-    GlyphWord {
-        cell_gap: GlyphWord::DOT_SIZE * rng.gen_range(GlyphWord::CELL_GAP_RATIO_RANGE),
-        cols,
-        rows,
-        filled,
-    }
+    filled: Vec<Vec<bool>>,
 }
 
 impl GlyphWord {
@@ -153,6 +217,33 @@ impl GlyphWord {
     /// Cells in one word. From one, which reads as a mark rather than as writing, to enough to
     /// read as a word without becoming a line of prose.
     const GLYPH_WORD_LENGTH_RANGE: RangeInclusive<usize> = 1..=10;
+
+    /// A cell that comes up empty has one dot set at random rather than being redrawn, so the
+    /// number of draws does not depend on how the dice fall.
+    pub fn sample(rng: &mut impl Rng) -> Self {
+        let cols = rng.gen_range(Self::COL_RANGE);
+        let rows = rng.gen_range(Self::ROW_RANGE);
+        let cell_count = rng.gen_range(Self::GLYPH_WORD_LENGTH_RANGE);
+
+        let mut filled = vec![];
+        for _ in 0..cell_count {
+            let mut cell = vec![false; cols * rows];
+            rng.fill(&mut cell[..]);
+            if cell.iter().all(|f| !*f) {
+                let dot_to_fill = rng.gen_range(0..cell.len());
+                cell[dot_to_fill] = true;
+            }
+
+            filled.push(cell);
+        }
+
+        Self {
+            cell_gap: Self::DOT_SIZE * rng.gen_range(Self::CELL_GAP_RATIO_RANGE),
+            cols,
+            rows,
+            filled,
+        }
+    }
 
     /// Across one cell: `cols` dots with a gap between each neighboring pair, so one fewer gap
     /// than dots.
@@ -197,46 +288,102 @@ impl GlyphWord {
     }
 }
 
+/// An angle in radians. The type carries no range: angles are periodic, so a value outside
+/// `0.0..TAU` is as valid as one inside. `Standard` drawing from a full turn is that
+/// distribution's support, not a constraint on the type.
+///
+/// A newtype rather than a bare `f64` so an angle cannot be swapped for a length stored beside it,
+/// and so the full-turn draw has one home.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum IconShape {
-    RingFragment { start_angle: f64, sweep: f64 },
-    Cross,
-    DiagonalPair { angle: f64, open_angle: f64 },
-}
+pub struct Angle(f64);
 
-/// One pseudo-pictogram fragment — ring-fragment, cross, or diagonal-pair — that never resolves
-/// into an actual sign. (`Arrow` was dropped: unlike the others, a directional arrow reads as a
-/// real, functional sign — the same "single element resolves the whole scene" failure as the
-/// literal door and the leveled eyes.) In particular a `RingFragment`'s `sweep` must never reach
-/// a full circle (that would complete into a real ring, a "resolved" whole shape).
-pub fn icon_shape(rng: &mut impl Rng) -> IconShape {
-    match rng.gen_range(0..3) {
-        0 => IconShape::RingFragment {
-            start_angle: rng.gen_range(0.0..TAU),
-            sweep: rng.gen_range(0.0..IconShape::MAX_SWEEP_RATIO * TAU),
-        },
-        1 => IconShape::Cross,
-        _ => IconShape::DiagonalPair {
-            angle: rng.gen_range(0.0..TAU),
-            open_angle: rng.gen_range(IconShape::OPEN_ANGLE_RATIO_RANGE) * TAU,
-        },
+impl Angle {
+    pub fn radians(self) -> f64 {
+        self.0
+    }
+}
+impl Distribution<Angle> for Standard {
+    fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> Angle {
+        Angle(rng.gen_range(0.0..TAU))
     }
 }
 
+/// An angular interval in radians: an amount turned rather than a direction.
+///
+/// Unlike `Angle`, the range here is an invariant and not merely a distribution's support. The
+/// field is private and `Standard` is the only constructor, so every `Sweep` that exists is under a
+/// full turn — an arc closing into a whole ring is unrepresentable rather than merely untested.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Sweep(f64);
+
+impl Sweep {
+    /// The largest fraction of a full turn a sweep may cover. Under 1 is what keeps the arc from
+    /// closing into a real ring; how far under is a judgment about when the remaining gap stops
+    /// reading as a gap, and no assertion against this constant can check that half.
+    const MAX_RATIO: f64 = 0.95;
+
+    pub fn radians(self) -> f64 {
+        self.0
+    }
+}
+impl Distribution<Sweep> for Standard {
+    fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> Sweep {
+        Sweep(rng.gen_range(0.0..Sweep::MAX_RATIO * TAU))
+    }
+}
+
+/// One pseudo-pictogram fragment — ring fragment, cross, or parallel chords — that never resolves
+/// into an actual sign. (`Arrow` was dropped: unlike the others, a directional arrow reads as a
+/// real, functional sign — the same "single element resolves the whole scene" failure as the
+/// literal door and the leveled eyes.) The one constraint that used to be stated here, that a
+/// `RingFragment` never reaches a full circle, is now carried by `Sweep`.
+#[derive(Debug, Clone, Copy, PartialEq, EnumDiscriminants)]
+#[strum_discriminants(name(IconShapeKind), derive(VariantArray))]
+pub enum IconShape {
+    RingFragment { start_angle: Angle, sweep: Sweep },
+    Cross,
+    ParallelChords { angle: Angle, chord_length: f64 },
+}
+
 impl IconShape {
-    /// Half the angle between the pair's two strokes, as a fraction of a full
-    /// turn. Away from zero so the two never coincide into a single line, and
-    /// well under a quarter turn so they never square up into a cross — which
-    /// is the neighboring variant, and a sign in its own right.
-    const OPEN_ANGLE_RATIO_RANGE: RangeInclusive<f64> = 1.0 / 16.0..=1.0 / 8.0;
-    /// The largest fraction of a full turn a `RingFragment` may sweep. Under 1 so the arc always
-    /// leaves a visible gap and never closes into a real ring.
-    const MAX_SWEEP_RATIO: f64 = 0.95;
+    pub fn sample(rng: &mut impl Rng) -> Self {
+        match IconShapeKind::VARIANTS.choose(rng).unwrap() {
+            IconShapeKind::RingFragment => Self::RingFragment {
+                start_angle: rng.gen(),
+                sweep: rng.gen(),
+            },
+            IconShapeKind::Cross => Self::Cross,
+            IconShapeKind::ParallelChords => Self::ParallelChords {
+                angle: rng.gen(),
+                chord_length: rng.gen_range(Self::length_range()),
+            },
+        }
+    }
+
+    fn length_range() -> RangeInclusive<f64> {
+        2.0 * (1.0 / 8.0 * TAU).cos()..=2.0 * (1.0 / 16.0 * TAU).cos()
+    }
+
+    pub fn cross_edges() -> [(Angle, Angle); 2] {
+        [
+            (Angle(0.0), Angle(TAU / 2.0)),
+            (Angle(TAU / 4.0), Angle(3.0 * TAU / 4.0)),
+        ]
+    }
+
+    pub fn chords(angle: Angle, chord_length: f64) -> [(Angle, Angle); 2] {
+        let angle = angle.radians();
+        let theta = (chord_length / 2.0).acos();
+        [
+            (Angle(angle + theta), Angle(angle + TAU / 2.0 - theta)),
+            (Angle(angle - theta), Angle(angle - TAU / 2.0 + theta)),
+        ]
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SevenSegment {
-    pub segments: [bool; 7], // a, b, c, d, e, f, g (standard 7-segment layout)
+    segments: [bool; 7], // a, b, c, d, e, f, g (standard 7-segment layout)
 }
 
 // standard 7-segment encodings for 0-9, the hex letters A-F (lowercase b/d, as on real
@@ -269,40 +416,24 @@ const REAL_CHARACTER_SEGMENTS: [[bool; 7]; 21] = [
     [false, true, true, true, false, true, false],   // リ
 ];
 
-#[derive(Debug, Clone, PartialEq)]
+/// A row of broken seven-segment cells, to read as a failing meter display rather than as an
+/// actual number.
+///
+/// No cell's pattern matches any real digit, hex letter, or other recognizable character caught so
+/// far. The fields are private and `sample` is the only way in, so that holds of every `Digits`
+/// there is — but only as far as `REAL_CHARACTER_SEGMENTS` reaches, and that table is best-effort
+/// rather than exhaustive. The enforcement is airtight; the predicate it enforces is not.
+///
 /// Every length here is in cell widths, a cell being one by definition, so nothing in this type is
 /// in pixels. `render` multiplies by whatever a cell is worth on its canvas. `cell` names the
 /// character, as it does in `GlyphWord`.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Digits {
     /// How wide a lit segment is drawn, in cell widths.
     thickness: f64,
-    pub cells: Vec<SevenSegment>,
+    cells: Vec<SevenSegment>,
     /// Space between one cell and the next, in cell widths.
     digit_gap: f64,
-}
-
-/// A row of `count` broken 7-segment-style cells. Each cell's pattern is guaranteed to NOT
-/// match any real digit, hex letter, or other recognizable character we've caught so far (see
-/// `REAL_CHARACTER_SEGMENTS`) — it should read as a broken meter display, never an actual
-/// character. This list is best-effort, not exhaustive.
-pub fn digits(rng: &mut impl Rng) -> Digits {
-    let mut cells: Vec<SevenSegment> = vec![
-        SevenSegment {
-            segments: [false; 7]
-        };
-        rng.gen_range(Digits::DIGITS_LENGTH_RANGE)
-    ];
-    for cell in cells.iter_mut() {
-        while cell.segments.iter().all(|f| !*f) || REAL_CHARACTER_SEGMENTS.contains(&cell.segments)
-        {
-            rng.fill(&mut cell.segments);
-        }
-    }
-    Digits {
-        thickness: Digits::DIGIT_WIDTH * rng.gen_range(Digits::THICKNESS_RATIO_RANGE),
-        cells,
-        digit_gap: Digits::DIGIT_WIDTH * rng.gen_range(Digits::DIGIT_GAP_RATIO_RANGE),
-    }
 }
 
 impl Digits {
@@ -326,6 +457,27 @@ impl Digits {
     /// Space between cells, in cell widths. Reaching zero would run the readout into one block; a
     /// full cell width is where it stops being one readout.
     const DIGIT_GAP_RATIO_RANGE: RangeInclusive<f64> = 0.1..=1.0;
+
+    pub fn sample(rng: &mut impl Rng) -> Self {
+        let mut cells: Vec<SevenSegment> = vec![
+            SevenSegment {
+                segments: [false; 7]
+            };
+            rng.gen_range(Self::DIGITS_LENGTH_RANGE)
+        ];
+        for cell in cells.iter_mut() {
+            while cell.segments.iter().all(|f| !*f)
+                || REAL_CHARACTER_SEGMENTS.contains(&cell.segments)
+            {
+                rng.fill(&mut cell.segments);
+            }
+        }
+        Self {
+            thickness: Self::DIGIT_WIDTH * rng.gen_range(Self::THICKNESS_RATIO_RANGE),
+            cells,
+            digit_gap: Self::DIGIT_WIDTH * rng.gen_range(Self::DIGIT_GAP_RATIO_RANGE),
+        }
+    }
 
     /// Across the whole readout, and down it, in cell widths. `render` asks `ref_point` for a
     /// rectangle this size and then draws `segments` inside it, so the two have to describe one
@@ -423,17 +575,12 @@ mod tests {
     fn eyes_are_never_level() {
         let mut rng = StdRng::seed_from_u64(1);
         for _ in 0..500 {
-            let e = eyes(&mut rng);
-            assert_ne!(e.dy, 0.0, "eyes must never be level (that reads as a face)");
-        }
-    }
-
-    #[test]
-    fn eyes_are_never_equal_sized() {
-        let mut rng = StdRng::seed_from_u64(2);
-        for _ in 0..500 {
-            let e = eyes(&mut rng);
-            assert_ne!(e.size_a, e.size_b, "eyes must be unequal in size");
+            let e = EyeMarks::sample(&mut rng);
+            assert_ne!(
+                e.dy(),
+                0.0,
+                "eyes must never be level (that reads as a face)"
+            );
         }
     }
 
@@ -449,7 +596,7 @@ mod tests {
     fn the_marks_fill_the_pair_they_are_reported_as_filling() {
         let mut rng = StdRng::seed_from_u64(11);
         for _ in 0..500 {
-            let e = eyes(&mut rng);
+            let e = EyeMarks::sample(&mut rng);
             let marks = e.marks();
 
             let left = marks.iter().map(|&(x, ..)| x).fold(f64::MAX, f64::min);
@@ -477,21 +624,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn eyes_sizes_stay_within_a_reasonable_range_of_the_base_size() {
-        let mut rng = StdRng::seed_from_u64(3);
-        let eye_size_range = EyeMarks::EYE_SIZE_RANGE;
-        for _ in 0..500 {
-            let e = eyes(&mut rng);
-            for s in [e.size_a, e.size_b] {
-                assert!(
-                    eye_size_range.contains(&s),
-                    "size {s} outside {eye_size_range:?}"
-                );
-            }
-        }
-    }
-
     /// `dots` and `width`/`height` are two readings of one layout, and `render` trusts them to
     /// agree: it asks `ref_point` for a rectangle of that size and then draws the dots inside it.
     /// The same split cost a mark its place once already, on the pair of eyes.
@@ -504,7 +636,7 @@ mod tests {
     fn every_dot_lands_inside_the_word_it_is_reported_as_filling() {
         let mut rng = StdRng::seed_from_u64(12);
         for _ in 0..500 {
-            let word = glyph_word(&mut rng);
+            let word = GlyphWord::sample(&mut rng);
             let dots = word.dots();
 
             // A dot's far edge and the word's own extent are the same sum of the same terms in a
@@ -538,7 +670,7 @@ mod tests {
     fn glyph_cell_is_never_fully_empty() {
         let mut rng = StdRng::seed_from_u64(4);
         for _ in 0..500 {
-            let g = glyph_word(&mut rng);
+            let g = GlyphWord::sample(&mut rng);
             assert_eq!(g.filled[0].len(), g.cols * g.rows);
             assert!(
                 g.filled[0].iter().any(|&f| f),
@@ -552,7 +684,7 @@ mod tests {
         // matches the original demo's asemic-character shape: 2-3 cols, 3-4 rows
         let mut rng = StdRng::seed_from_u64(5);
         for _ in 0..500 {
-            let g = glyph_word(&mut rng);
+            let g = GlyphWord::sample(&mut rng);
             assert!(
                 GlyphWord::COL_RANGE.contains(&g.cols),
                 "cols {} out of range",
@@ -570,7 +702,7 @@ mod tests {
     fn glyph_words_produces_exactly_count_characters_all_non_empty() {
         let mut rng = StdRng::seed_from_u64(9);
         for _ in 0..500 {
-            let g = glyph_word(&mut rng);
+            let g = GlyphWord::sample(&mut rng);
             for (i, grid) in g.filled.iter().enumerate() {
                 assert_eq!(grid.len(), g.cols * g.rows);
                 assert!(
@@ -586,10 +718,11 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(6);
         let mut saw_ring_fragment = false;
         for _ in 0..500 {
-            if let IconShape::RingFragment { sweep, .. } = icon_shape(&mut rng) {
+            if let IconShape::RingFragment { sweep, .. } = IconShape::sample(&mut rng) {
+                let sweep = sweep.radians();
                 saw_ring_fragment = true;
                 assert!(
-                    sweep < IconShape::MAX_SWEEP_RATIO * TAU,
+                    sweep < Sweep::MAX_RATIO * TAU,
                     "ring fragment sweep {sweep} too close to a full circle"
                 );
             }
@@ -597,11 +730,91 @@ mod tests {
         assert!(saw_ring_fragment, "500 draws never produced a RingFragment");
     }
 
+    /// `chords` hands back angles and `render` turns them into points on a circle of some radius,
+    /// so the length actually drawn is never stated anywhere — it falls out of the trigonometry.
+    /// Which is how the two halves of this once disagreed by a factor of two: `chord_length` was a
+    /// multiple of the radius on one side of the file and of the diameter on the other, and since
+    /// the standard chord relation carries a two either way, both spellings looked right.
+    ///
+    /// Drawn on the unit circle so a radius of one makes the reported length directly comparable.
+    #[test]
+    fn a_chord_comes_out_the_length_it_was_asked_for() {
+        let mut rng = StdRng::seed_from_u64(13);
+        let mut saw_chords = false;
+        for _ in 0..500 {
+            let IconShape::ParallelChords {
+                angle,
+                chord_length,
+            } = IconShape::sample(&mut rng)
+            else {
+                continue;
+            };
+            saw_chords = true;
+
+            for (start, end) in IconShape::chords(angle, chord_length) {
+                let start = start.radians();
+                let end = end.radians();
+                let drawn = (end.cos() - start.cos()).hypot(end.sin() - start.sin());
+                assert!(
+                    (drawn - chord_length).abs() < 1e-9,
+                    "asked for {chord_length} and drew {drawn}"
+                );
+            }
+        }
+        assert!(saw_chords, "500 draws never produced a ParallelChords");
+    }
+
+    /// The pair is two parallel chords either side of the centre, which is what the variant is
+    /// named for. Nothing in the construction says so — it comes out of the two chords being
+    /// mirror images about the axis through `angle` — and an earlier comment claimed instead that
+    /// a wide enough opening would square them into a cross, which cannot happen at any value.
+    #[test]
+    fn the_two_chords_are_parallel_and_straddle_the_centre() {
+        let mut rng = StdRng::seed_from_u64(14);
+        for _ in 0..500 {
+            let IconShape::ParallelChords {
+                angle,
+                chord_length,
+            } = IconShape::sample(&mut rng)
+            else {
+                continue;
+            };
+
+            let [first, second] = IconShape::chords(angle, chord_length).map(|(start, end)| {
+                let start = start.radians();
+                let end = end.radians();
+                let (from, to) = ((start.cos(), start.sin()), (end.cos(), end.sin()));
+                let heading = (to.1 - from.1).atan2(to.0 - from.0).rem_euclid(TAU / 2.0);
+                // Signed distance from the centre, positive on one side of the chord's line and
+                // negative on the other, so a pair that straddles the centre sums to zero.
+                let offset = ((to.0 - from.0) * from.1 - from.0 * (to.1 - from.1)) / chord_length;
+                (heading, offset)
+            });
+
+            assert!(
+                (first.0 - second.0).abs() < 1e-9,
+                "chords head {} and {} degrees apart",
+                first.0.to_degrees(),
+                second.0.to_degrees()
+            );
+            assert!(
+                (first.1 + second.1).abs() < 1e-9,
+                "chords sit {} and {} from the centre rather than either side of it",
+                first.1,
+                second.1
+            );
+            assert!(
+                first.1.abs() > 1e-9,
+                "the chords have collapsed onto one line through the centre"
+            );
+        }
+    }
+
     #[test]
     fn digits_never_match_a_real_digit() {
         let mut rng = StdRng::seed_from_u64(8);
         for _ in 0..500 {
-            let d = digits(&mut rng);
+            let d = Digits::sample(&mut rng);
             for cell in &d.cells {
                 assert!(
                     !REAL_CHARACTER_SEGMENTS.contains(&cell.segments),

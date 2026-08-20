@@ -12,7 +12,7 @@ use rand::{seq::SliceRandom, Rng};
 use tiny_skia::{BlendMode, Color, Paint, PathBuilder, Pixmap, Point, Rect, Stroke, Transform};
 
 use crate::{
-    dreamcore::{digits, eyes, glyph_word, icon_shape, IconShape},
+    dreamcore::{Fragment, IconShape},
     flow::{advect_rk2, curl_velocity},
     noise::GradientNoise,
     palette::{Palette, Rgb},
@@ -552,17 +552,17 @@ pub fn render_dreamcore<R: Rng>(
                 .choose(rng)
                 .expect("color should be determined"),
         ));
-        match rng.gen_range(0..4) {
-            0 => {
-                let eyes = eyes(rng);
+
+        match Fragment::sample(rng) {
+            Fragment::Eyes(eyes) => {
                 // Size of one mark, as how many would fit across the short side. Small enough to
                 // read as a detail rather than as the subject — the style wants fragments, and a
                 // pair of eyes large enough to be looked *at* resolves the scene.
                 //
-                // Alone among the four it is a nominal rather than an exact size: `EyeMarks` draws
-                // each mark at half to twice this, where the other three kinds size their unit
-                // outright. So a pair spans considerably more than one of these, and how much more
-                // is the reconcile item in #2.
+                // This is the bigger of the pair's two marks exactly, the smaller being a fraction
+                // of it — so, like the other three kinds, the unit is sized once and here. A second
+                // size draw inside `EyeMarks` would leave this name overstating how fine a pair
+                // reads.
                 const EYE_MARK_PER_SCREEN_RANGE: RangeInclusive<f64> = 10.0..=100.0;
                 let base_size = min_wh / rng.gen_range(EYE_MARK_PER_SCREEN_RANGE);
                 let left_upper = ref_point(
@@ -586,9 +586,7 @@ pub fn render_dreamcore<R: Rng>(
                     );
                 }
             }
-            1 => {
-                let glyph_word = glyph_word(rng);
-
+            Fragment::GlyphWord(glyph_word) => {
                 // Size of one *dot*, as how many would fit across the short side — so a cell is
                 // three to five of these across and a whole word far more, which is why this range
                 // sits an order of magnitude above the others. Sizing the dot rather than the cell
@@ -620,9 +618,7 @@ pub fn render_dreamcore<R: Rng>(
                     );
                 }
             }
-            2 => {
-                let icon_shape = icon_shape(rng);
-
+            Fragment::Icon(icon_shape) => {
                 // Nominal size of an icon, as how many would fit across the short side. The
                 // coarsest of the four kinds by an order of magnitude: a pictogram is read as one
                 // sign rather than as texture, so it has to be large enough to have a shape.
@@ -642,94 +638,92 @@ pub fn render_dreamcore<R: Rng>(
                 };
                 match icon_shape {
                     IconShape::Cross => {
-                        let mut pb = PathBuilder::new();
-                        pb.move_to(center.x + radius, center.y);
-                        pb.line_to(center.x - radius, center.y);
-                        pixmap.stroke_path(
-                            &pb.finish().unwrap(),
-                            &paint,
-                            &stroke,
-                            Transform::identity(),
-                            None,
-                        );
-                        pb = PathBuilder::new();
-                        pb.move_to(center.x, center.y + radius);
-                        pb.line_to(center.x, center.y - radius);
-                        pixmap.stroke_path(
-                            &pb.finish().unwrap(),
-                            &paint,
-                            &stroke,
-                            Transform::identity(),
-                            None,
-                        );
+                        for (start_angle, end_angle) in IconShape::cross_edges() {
+                            let start_angle = start_angle.radians();
+                            let end_angle = end_angle.radians();
+                            let mut pb = PathBuilder::new();
+                            pb.move_to(
+                                center.x + radius * start_angle.cos() as f32,
+                                center.y + radius * start_angle.sin() as f32,
+                            );
+                            pb.line_to(
+                                center.x + radius * end_angle.cos() as f32,
+                                center.y + radius * end_angle.sin() as f32,
+                            );
+                            pixmap.stroke_path(
+                                &pb.finish().unwrap(),
+                                &paint,
+                                &stroke,
+                                Transform::identity(),
+                                None,
+                            );
+                        }
                     }
-                    IconShape::DiagonalPair { angle, open_angle } => {
-                        let angle = angle as f32;
-                        let open_angle = open_angle as f32;
-                        let mut pb = PathBuilder::new();
-                        pb.move_to(
-                            center.x + radius * (angle + open_angle).cos(),
-                            center.y + radius * (angle + open_angle).sin(),
-                        );
-                        pb.line_to(
-                            center.x + radius * (angle + TAU / 2.0 - open_angle).cos(),
-                            center.y + radius * (angle + TAU / 2.0 - open_angle).sin(),
-                        );
-                        pixmap.stroke_path(
-                            &pb.finish().unwrap(),
-                            &paint,
-                            &stroke,
-                            Transform::identity(),
-                            None,
-                        );
-                        pb = PathBuilder::new();
-                        pb.move_to(
-                            center.x + radius * (angle - open_angle).cos(),
-                            center.y + radius * (angle - open_angle).sin(),
-                        );
-                        pb.line_to(
-                            center.x + radius * (angle - TAU / 2.0 + open_angle).cos(),
-                            center.y + radius * (angle - TAU / 2.0 + open_angle).sin(),
-                        );
-                        pixmap.stroke_path(
-                            &pb.finish().unwrap(),
-                            &paint,
-                            &stroke,
-                            Transform::identity(),
-                            None,
-                        );
+                    IconShape::ParallelChords {
+                        angle,
+                        chord_length,
+                    } => {
+                        for (start_angle, end_angle) in IconShape::chords(angle, chord_length) {
+                            let start_angle = start_angle.radians();
+                            let end_angle = end_angle.radians();
+                            let mut pb = PathBuilder::new();
+                            pb.move_to(
+                                center.x + radius * start_angle.cos() as f32,
+                                center.y + radius * start_angle.sin() as f32,
+                            );
+                            pb.line_to(
+                                center.x + radius * end_angle.cos() as f32,
+                                center.y + radius * end_angle.sin() as f32,
+                            );
+                            pixmap.stroke_path(
+                                &pb.finish().unwrap(),
+                                &paint,
+                                &stroke,
+                                Transform::identity(),
+                                None,
+                            );
+                        }
                     }
                     IconShape::RingFragment { start_angle, sweep } => {
-                        let start_angle = start_angle as f32;
-                        let sweep = sweep as f32;
+                        let start_angle = start_angle.radians() as f32;
+                        let sweep = sweep.radians() as f32;
+
+                        // The arc reaches tiny-skia as cubics because its path API has no arc, and
+                        // turning a curve into something a rasterizer can fill is the rasterizer's
+                        // own business — handing it cubics is how to say that rather than
+                        // flattening the arc here and taking the job away.
+                        //
+                        // One cubic covers this much of the arc, its control points `4/3 *
+                        // tan(span / 4)` of the radius along the tangents. At a sixth of a turn
+                        // that approximation strays from the true circle by 2.4e-5 of the radius,
+                        // so an icon filling a 4K short side is out by a fortieth of a pixel.
+                        // Being a relative error, that bound holds at every size, which is the
+                        // whole gain over subdividing against a tolerance in pixels: there is
+                        // nothing left that depends on how large the icon came out.
+                        const MAX_SPAN: f32 = TAU / 6.0;
+                        // `.max(1.0)` for a `sweep` of exactly zero, which would otherwise leave
+                        // the path a lone `move_to` and `finish` returning `None`.
+                        let spans = (sweep / MAX_SPAN).ceil().max(1.0) as u32;
+                        let span = sweep / spans as f32;
+                        // How far along the tangent each control point sits, as a fraction of the
+                        // radius.
+                        let handle = 4.0 / 3.0 * (span / 4.0).tan();
+
                         let mut pb = PathBuilder::new();
                         pb.move_to(
                             center.x + radius * start_angle.cos(),
                             center.y + radius * start_angle.sin(),
                         );
-
-                        // How far the drawn polyline may sit from the arc it stands for. A tenth
-                        // of a pixel is under what anti-aliasing can express — coverage resolves
-                        // to 1/255, so a deviation this small changes an edge pixel by at most a
-                        // level or two — which makes it the point past which a finer subdivision
-                        // buys nothing that can be seen. Inverting the sagitta `r(1 - cos(t/2))`
-                        // through its small-angle form `r*t^2/8` gives the count. The small-angle
-                        // form is conservative rather than approximate here, since `1 - cos x` is
-                        // never above `x^2/2`, and unlike the exact `2*acos(1 - e/r)` it stays
-                        // finite for a radius under the tolerance.
-                        const ARC_TOLERANCE_PX: f32 = 0.1;
-                        // `.max(1.0)` is holding back a panic, not an empty loop: `sweep` can be
-                        // exactly zero, `ceil` then gives no steps, and a path of one `move_to`
-                        // makes `PathBuilder::finish` return `None` for the `expect` below.
-                        let steps = (sweep * (radius / (8.0 * ARC_TOLERANCE_PX)).sqrt())
-                            .ceil()
-                            .max(1.0) as u32;
-
-                        for i in 1..=steps {
-                            let theta = start_angle + sweep * i as f32 / steps as f32;
-                            pb.line_to(
-                                center.x + radius * theta.cos(),
-                                center.y + radius * theta.sin(),
+                        for i in 0..spans {
+                            let from = start_angle + span * i as f32;
+                            let to = from + span;
+                            pb.cubic_to(
+                                center.x + radius * (from.cos() - handle * from.sin()),
+                                center.y + radius * (from.sin() + handle * from.cos()),
+                                center.x + radius * (to.cos() + handle * to.sin()),
+                                center.y + radius * (to.sin() - handle * to.cos()),
+                                center.x + radius * to.cos(),
+                                center.y + radius * to.sin(),
                             );
                         }
                         pixmap.stroke_path(
@@ -742,9 +736,7 @@ pub fn render_dreamcore<R: Rng>(
                     }
                 }
             }
-            _ => {
-                let digits = digits(rng);
-
+            Fragment::Digits(digits) => {
                 // Width of one cell, as how many would fit across the short side. Between the
                 // icons and the glyphs: a readout is meant to be legible as a display, which a
                 // glyph is not, without being the subject, which an icon is.
