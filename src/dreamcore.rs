@@ -3,6 +3,8 @@
 //! a PNG:
 //!   - `eyes`: must never present as a level, equal-size pair — that reads as a face, which is
 //!     the exact "single element resolves the whole scene" failure this project already hit once.
+//!     Neither half needs a check any more: `DY_RATIO_RANGE` and `SMALLER_SIZE_RANGE` between them
+//!     make such a pair unrepresentable.
 //!   - `glyph_word`: no cell may come out with every dot unset (an empty box reads as "nothing",
 //!     not as "unreadable writing").
 //!   - `icon_shape`: a `RingFragment` must never sweep a full circle — that completes into a real
@@ -11,78 +13,123 @@
 //!   - `digits`: each cell's segment pattern must never match a real digit 0-9 — it should
 //!     read as a broken display, not an actual number.
 
-use std::{f64::consts::TAU, ops::RangeInclusive};
+use std::{
+    f64::consts::TAU,
+    ops::{Range, RangeInclusive},
+};
 
 use rand::{
     distributions::{Distribution, Standard},
     Rng,
 };
 
+/// Every length here is in widths of the bigger mark, that mark being one by definition, so nothing
+/// in this type is in pixels. `render` multiplies by whatever the bigger mark is worth on its
+/// canvas. Only the smaller mark's size is stored, since the bigger one is the unit.
+///
+/// The pair is described by which mark is on top rather than by which is on the left, because that
+/// is the axis the constraint lives on: how far the lower mark may drop is bounded by the upper
+/// one's height. Left and right are then a free choice, made by `is_upper_left` and used only for
+/// layout.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EyeMarks {
-    size_a: f64,
-    size_b: f64,
+    is_upper_smaller: bool,
+    is_upper_left: bool,
+    smaller_size: f64,
     gap: f64,
-    dy: f64, // vertical offset between the two marks — nonzero means "not level"
+    /// How far the lower mark sits below the upper one, as a fraction of the upper one — a ratio
+    /// rather than a length, which is why it is the one field not in bigger-mark widths. `dy`
+    /// converts.
+    dy_ratio: f64,
 }
 
-/// Two small marks suggesting a gaze, sized relative to `base_size`. Deliberately asymmetric:
-/// unequal size and never level, so they never complete into a face.
+/// Two small marks suggesting a gaze. Deliberately asymmetric: unequal size and never level, so
+/// they never complete into a face.
 ///
-/// "Never level" holds by construction, since `DY_RANGE` excludes zero. "Unequal size" does not:
-/// the two sizes are independent draws from one range and can coincide. The test for it asserts a
-/// property of the draw rather than of the design, and #3 is where that is made structural.
+/// Both halves hold by construction. "Never level" because `DY_RATIO_RANGE` excludes zero, and
+/// "unequal size" because `SMALLER_SIZE_RANGE` is half-open below one — a pair of equal marks is
+/// not a thing this type can hold, rather than one a test happens not to have seen.
+///
+/// Every field is an independent draw, so nothing here has to happen in a particular order. Taking
+/// one field's bound from another's value is the shape to avoid: it gives the bound somewhere to be
+/// computed, and so somewhere to be computed wrongly.
 pub fn eyes(rng: &mut impl Rng) -> EyeMarks {
-    let size_a = rng.gen_range(EyeMarks::EYE_SIZE_RANGE);
-    let size_b = rng.gen_range(EyeMarks::EYE_SIZE_RANGE);
-    let offset = rng.gen_range(EyeMarks::DY_RANGE);
-
     EyeMarks {
-        size_a,
-        size_b,
-        gap: size_a.max(size_b) * rng.gen_range(EyeMarks::GAP_RANGE),
-        dy: if rng.gen() { -offset } else { offset },
+        is_upper_smaller: rng.gen(),
+        is_upper_left: rng.gen(),
+        smaller_size: EyeMarks::BIGGER_EYE_SIZE * rng.gen_range(EyeMarks::SMALLER_SIZE_RANGE),
+        gap: EyeMarks::BIGGER_EYE_SIZE * rng.gen_range(EyeMarks::GAP_RANGE),
+        dy_ratio: rng.gen_range(EyeMarks::DY_RATIO_RANGE),
     }
 }
 
 impl EyeMarks {
-    /// How large each mark is against `base_size`. Drawn twice and independently, which is where the
-    /// pair's size asymmetry comes from — and also why the asymmetry is only likely rather than
-    /// certain. #3 replaces this with a ratio between the two marks.
-    const EYE_SIZE_RANGE: RangeInclusive<f64> = 0.5..=2.0;
-    /// Space between the marks, against the larger of the two — the pair reads as a gaze rather than
-    /// as two unrelated dots only while the gap stays in scale with what it separates.
+    /// The unit everything else is measured in, so one by definition.
+    const BIGGER_EYE_SIZE: f64 = 1.0;
+    /// The other mark, as a fraction of the bigger one. Being a `Range` rather than a
+    /// `RangeInclusive` is what carries "unequal size": the excluded upper end is the whole
+    /// enforcement, so widening this to `..=1.0` would quietly give the pair back its face. How far
+    /// below one the range starts is the separate, aesthetic half — the point at which the
+    /// difference stops being visible — and no assertion reading this constant can check that.
+    const SMALLER_SIZE_RANGE: Range<f64> = 0.5..1.0;
+    /// Space between the marks, in bigger-mark widths — the pair reads as a gaze rather than as two
+    /// unrelated dots only while the gap stays in scale with what it separates.
     const GAP_RANGE: RangeInclusive<f64> = 1.0..=5.0;
-    /// How far out of level the pair sits, against `base_size`. The lower end is what keeps "never
-    /// level" true rather than merely representable: a smaller one would be a level pair drawn with a
-    /// nonzero number in it.
-    const DY_RANGE: RangeInclusive<f64> = 0.25..=1.5;
+    /// How far out of level the pair sits, as a fraction of the upper mark. Both ends carry
+    /// something, and the type of the range is half of it — as with `SMALLER_SIZE_RANGE`.
+    ///
+    /// The excluded upper end is what keeps the two marks overlapping vertically: the lower mark
+    /// drops by less than the upper one's height, so the pair always shares a band and reads as one
+    /// thing. At a ratio of one they would merely touch, and past it they would be two stacked dots.
+    /// The lower end keeps "never level" true rather than merely representable: a smaller one would
+    /// be a level pair drawn with a nonzero number in it.
+    const DY_RATIO_RANGE: Range<f64> = 0.25..1.0;
 
-    /// Total span across, in the same units as `size_a`
+    /// The drop from the upper mark to the lower one, in bigger-mark widths — the one place the
+    /// stored ratio is turned into a length in this type's own unit.
+    fn dy(&self) -> f64 {
+        self.dy_ratio * self.upper_size()
+    }
+
+    fn lower_size(&self) -> f64 {
+        if self.is_upper_smaller {
+            Self::BIGGER_EYE_SIZE
+        } else {
+            self.smaller_size
+        }
+    }
+
+    fn upper_size(&self) -> f64 {
+        if self.is_upper_smaller {
+            self.smaller_size
+        } else {
+            Self::BIGGER_EYE_SIZE
+        }
+    }
+
+    /// Total span across, in bigger-mark widths
     pub fn width(&self) -> f64 {
-        self.size_a + self.gap + self.size_b
+        self.smaller_size + self.gap + Self::BIGGER_EYE_SIZE
     }
 
-    /// Total span down, in the same units as `size_a`
+    /// Total span down, in bigger-mark widths
     pub fn height(&self) -> f64 {
-        self.size_a.max(self.dy + self.size_b) + (-self.dy).max(0.0)
+        self.upper_size().max(self.dy() + self.lower_size())
     }
 
-    fn first_top(&self) -> f64 {
-        (-self.dy).max(0.0)
-    }
-
-    /// Each mark as (left, top, size), in the same units as `size_a`, from the pair's own
-    /// top-left corner.
+    /// Each mark as (left, top, size), in bigger-mark widths, from the pair's own top-left corner.
     pub fn marks(&self) -> [(f64, f64, f64); 2] {
-        [
-            (0.0, self.first_top(), self.size_a),
-            (
-                self.size_a + self.gap,
-                self.first_top() + self.dy,
-                self.size_b,
-            ),
-        ]
+        if self.is_upper_left {
+            [
+                (0.0, 0.0, self.upper_size()),
+                (self.upper_size() + self.gap, self.dy(), self.lower_size()),
+            ]
+        } else {
+            [
+                (0.0, self.dy(), self.lower_size()),
+                (self.lower_size() + self.gap, 0.0, self.upper_size()),
+            ]
+        }
     }
 }
 
@@ -483,16 +530,11 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(1);
         for _ in 0..500 {
             let e = eyes(&mut rng);
-            assert_ne!(e.dy, 0.0, "eyes must never be level (that reads as a face)");
-        }
-    }
-
-    #[test]
-    fn eyes_are_never_equal_sized() {
-        let mut rng = StdRng::seed_from_u64(2);
-        for _ in 0..500 {
-            let e = eyes(&mut rng);
-            assert_ne!(e.size_a, e.size_b, "eyes must be unequal in size");
+            assert_ne!(
+                e.dy(),
+                0.0,
+                "eyes must never be level (that reads as a face)"
+            );
         }
     }
 
@@ -531,21 +573,6 @@ mod tests {
                 assert!(
                     (got - want).abs() < 1e-9,
                     "{name} is {got} against the reported {want}, from marks {marks:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn eyes_sizes_stay_within_a_reasonable_range_of_the_base_size() {
-        let mut rng = StdRng::seed_from_u64(3);
-        let eye_size_range = EyeMarks::EYE_SIZE_RANGE;
-        for _ in 0..500 {
-            let e = eyes(&mut rng);
-            for s in [e.size_a, e.size_b] {
-                assert!(
-                    eye_size_range.contains(&s),
-                    "size {s} outside {eye_size_range:?}"
                 );
             }
         }

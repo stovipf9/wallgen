@@ -559,10 +559,10 @@ pub fn render_dreamcore<R: Rng>(
                 // read as a detail rather than as the subject — the style wants fragments, and a
                 // pair of eyes large enough to be looked *at* resolves the scene.
                 //
-                // Alone among the four it is a nominal rather than an exact size: `EyeMarks` draws
-                // each mark at half to twice this, where the other three kinds size their unit
-                // outright. So a pair spans considerably more than one of these, and how much more
-                // is the reconcile item in #2.
+                // This is the bigger of the pair's two marks exactly, the smaller being a fraction
+                // of it — so, like the other three kinds, the unit is sized once and here. A second
+                // size draw inside `EyeMarks` would leave this name overstating how fine a pair
+                // reads.
                 const EYE_MARK_PER_SCREEN_RANGE: RangeInclusive<f64> = 10.0..=100.0;
                 let base_size = min_wh / rng.gen_range(EYE_MARK_PER_SCREEN_RANGE);
                 let left_upper = ref_point(
