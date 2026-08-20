@@ -25,6 +25,41 @@ use rand::{
 };
 use strum::{EnumDiscriminants, VariantArray};
 
+/// The vocabulary of things that can be scattered across a Dreamcore canvas — one variant per kind,
+/// each carrying the shape its own type describes and nothing about where it lands.
+///
+/// This is the whole of what `render` may draw. It consumes a `Fragment` by matching on it, so the
+/// two halves cannot drift: adding a variant here stops both this module's construction and that
+/// module's drawing from compiling until each has an arm.
+///
+/// What stays a judgment is whether a new generator should become a variant at all. Not every shape
+/// this module can make has to be scatterable, and nothing here can decide that — but once the
+/// variant exists, both ends of it are the compiler's to enforce.
+///
+/// `FragmentKind` is the fieldless mirror `sample` draws from. It exists only because a variant with
+/// a payload cannot serve as its own selector; `render` never needs it.
+#[derive(EnumDiscriminants)]
+#[strum_discriminants(name(FragmentKind), derive(VariantArray))]
+pub enum Fragment {
+    Eyes(EyeMarks),
+    GlyphWord(GlyphWord),
+    Icon(IconShape),
+    Digits(Digits),
+}
+
+impl Fragment {
+    /// Every kind is equally likely. Which arm builds which variant is not checked by anything —
+    /// the exhaustiveness is over the kind, not over the correspondence.
+    pub fn sample(rng: &mut impl Rng) -> Self {
+        match FragmentKind::VARIANTS.choose(rng).unwrap() {
+            FragmentKind::Eyes => Self::Eyes(EyeMarks::sample(rng)),
+            FragmentKind::GlyphWord => Self::GlyphWord(GlyphWord::sample(rng)),
+            FragmentKind::Icon => Self::Icon(IconShape::sample(rng)),
+            FragmentKind::Digits => Self::Digits(Digits::sample(rng)),
+        }
+    }
+}
+
 /// Two small marks suggesting a gaze. Deliberately asymmetric: unequal size and never level, so
 /// they never complete into a face. Both halves hold by construction — "never level" because
 /// `DY_RATIO_RANGE` excludes zero, "unequal size" because `SMALLER_SIZE_RANGE` is half-open below
