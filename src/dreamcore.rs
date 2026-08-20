@@ -23,6 +23,12 @@ use rand::{
     Rng,
 };
 
+/// Two small marks suggesting a gaze. Deliberately asymmetric: unequal size and never level, so
+/// they never complete into a face. Both halves hold by construction — "never level" because
+/// `DY_RATIO_RANGE` excludes zero, "unequal size" because `SMALLER_SIZE_RANGE` is half-open below
+/// one — so a pair of equal or level marks is not a thing this type can hold, rather than one a
+/// test happens not to have seen.
+///
 /// Every length here is in widths of the bigger mark, that mark being one by definition, so nothing
 /// in this type is in pixels. `render` multiplies by whatever the bigger mark is worth on its
 /// canvas. Only the smaller mark's size is stored, since the bigger one is the unit.
@@ -41,26 +47,6 @@ pub struct EyeMarks {
     /// rather than a length, which is why it is the one field not in bigger-mark widths. `dy`
     /// converts.
     dy_ratio: f64,
-}
-
-/// Two small marks suggesting a gaze. Deliberately asymmetric: unequal size and never level, so
-/// they never complete into a face.
-///
-/// Both halves hold by construction. "Never level" because `DY_RATIO_RANGE` excludes zero, and
-/// "unequal size" because `SMALLER_SIZE_RANGE` is half-open below one — a pair of equal marks is
-/// not a thing this type can hold, rather than one a test happens not to have seen.
-///
-/// Every field is an independent draw, so nothing here has to happen in a particular order. Taking
-/// one field's bound from another's value is the shape to avoid: it gives the bound somewhere to be
-/// computed, and so somewhere to be computed wrongly.
-pub fn eyes(rng: &mut impl Rng) -> EyeMarks {
-    EyeMarks {
-        is_upper_smaller: rng.gen(),
-        is_upper_left: rng.gen(),
-        smaller_size: EyeMarks::BIGGER_EYE_SIZE * rng.gen_range(EyeMarks::SMALLER_SIZE_RANGE),
-        gap: EyeMarks::BIGGER_EYE_SIZE * rng.gen_range(EyeMarks::GAP_RANGE),
-        dy_ratio: rng.gen_range(EyeMarks::DY_RATIO_RANGE),
-    }
 }
 
 impl EyeMarks {
@@ -84,6 +70,19 @@ impl EyeMarks {
     /// The lower end keeps "never level" true rather than merely representable: a smaller one would
     /// be a level pair drawn with a nonzero number in it.
     const DY_RATIO_RANGE: Range<f64> = 0.25..1.0;
+
+    /// Every field is an independent draw, so nothing here has to happen in a particular order.
+    /// Taking one field's bound from another's value is the shape to avoid: it gives the bound
+    /// somewhere to be computed, and so somewhere to be computed wrongly.
+    pub fn sample(rng: &mut impl Rng) -> Self {
+        Self {
+            is_upper_smaller: rng.gen(),
+            is_upper_left: rng.gen(),
+            smaller_size: Self::BIGGER_EYE_SIZE * rng.gen_range(Self::SMALLER_SIZE_RANGE),
+            gap: Self::BIGGER_EYE_SIZE * rng.gen_range(Self::GAP_RANGE),
+            dy_ratio: rng.gen_range(Self::DY_RATIO_RANGE),
+        }
+    }
 
     /// The drop from the upper mark to the lower one, in bigger-mark widths — the one place the
     /// stored ratio is turned into a length in this type's own unit.
@@ -133,6 +132,14 @@ impl EyeMarks {
     }
 }
 
+/// One asemic word: a row of cells, each a small grid of set and unset dots that reads as written
+/// but resolves to nothing. Every cell in a word shares one `cols` x `rows` shape, the way a
+/// typeface holds its characters to one body.
+///
+/// No cell is ever left with every dot unset — an empty box among filled ones reads as a space, and
+/// a word of nothing but spaces reads as nothing at all. The fields are private and `sample` is the
+/// only way in, so that holds of every `GlyphWord` there is.
+///
 /// Three sizes are in play and each has one name: a **dot** is the smallest square, a **cell** is
 /// one character's grid of them, and a **word** is the row of cells. That is braille's vocabulary,
 /// where a cell is likewise the character rather than the mark, and `Digits` uses `cell` the same
@@ -143,43 +150,12 @@ impl EyeMarks {
 #[derive(Debug, Clone, PartialEq)]
 pub struct GlyphWord {
     /// Space between one cell and the next, in dot widths.
-    pub cell_gap: f64,
+    cell_gap: f64,
     /// Dots across one cell, and down it. Every cell in the word shares them.
-    pub cols: usize,
-    pub rows: usize,
+    cols: usize,
+    rows: usize,
     /// One entry per cell, each `cols * rows` dots in row-major order.
-    pub filled: Vec<Vec<bool>>,
-}
-
-/// One asemic word: a row of cells, each a small grid of set and unset dots that reads as written
-/// but resolves to nothing. Every cell in a word shares one `cols` x `rows` shape, the way a
-/// typeface holds its characters to one body.
-///
-/// No cell is ever left with every dot unset — one is set at random instead — since an empty box
-/// among filled ones reads as a space, and a word of nothing but spaces reads as nothing at all.
-pub fn glyph_word(rng: &mut impl Rng) -> GlyphWord {
-    let cols = rng.gen_range(GlyphWord::COL_RANGE);
-    let rows = rng.gen_range(GlyphWord::ROW_RANGE);
-    let cell_count = rng.gen_range(GlyphWord::GLYPH_WORD_LENGTH_RANGE);
-
-    let mut filled = vec![];
-    for _ in 0..cell_count {
-        let mut cell = vec![false; cols * rows];
-        rng.fill(&mut cell[..]);
-        if cell.iter().all(|f| !*f) {
-            let dot_to_fill = rng.gen_range(0..cell.len());
-            cell[dot_to_fill] = true;
-        }
-
-        filled.push(cell);
-    }
-
-    GlyphWord {
-        cell_gap: GlyphWord::DOT_SIZE * rng.gen_range(GlyphWord::CELL_GAP_RATIO_RANGE),
-        cols,
-        rows,
-        filled,
-    }
+    filled: Vec<Vec<bool>>,
 }
 
 impl GlyphWord {
@@ -204,6 +180,33 @@ impl GlyphWord {
     /// Cells in one word. From one, which reads as a mark rather than as writing, to enough to
     /// read as a word without becoming a line of prose.
     const GLYPH_WORD_LENGTH_RANGE: RangeInclusive<usize> = 1..=10;
+
+    /// A cell that comes up empty has one dot set at random rather than being redrawn, so the
+    /// number of draws does not depend on how the dice fall.
+    pub fn sample(rng: &mut impl Rng) -> Self {
+        let cols = rng.gen_range(Self::COL_RANGE);
+        let rows = rng.gen_range(Self::ROW_RANGE);
+        let cell_count = rng.gen_range(Self::GLYPH_WORD_LENGTH_RANGE);
+
+        let mut filled = vec![];
+        for _ in 0..cell_count {
+            let mut cell = vec![false; cols * rows];
+            rng.fill(&mut cell[..]);
+            if cell.iter().all(|f| !*f) {
+                let dot_to_fill = rng.gen_range(0..cell.len());
+                cell[dot_to_fill] = true;
+            }
+
+            filled.push(cell);
+        }
+
+        Self {
+            cell_gap: Self::DOT_SIZE * rng.gen_range(Self::CELL_GAP_RATIO_RANGE),
+            cols,
+            rows,
+            filled,
+        }
+    }
 
     /// Across one cell: `cols` dots with a gap between each neighboring pair, so one fewer gap
     /// than dots.
@@ -293,32 +296,32 @@ impl Distribution<Sweep> for Standard {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+/// One pseudo-pictogram fragment — ring fragment, cross, or parallel chords — that never resolves
+/// into an actual sign. (`Arrow` was dropped: unlike the others, a directional arrow reads as a
+/// real, functional sign — the same "single element resolves the whole scene" failure as the
+/// literal door and the leveled eyes.) The one constraint that used to be stated here, that a
+/// `RingFragment` never reaches a full circle, is now carried by `Sweep`.
 pub enum IconShape {
     RingFragment { start_angle: Angle, sweep: Sweep },
     Cross,
     ParallelChords { angle: Angle, chord_length: f64 },
 }
 
-/// One pseudo-pictogram fragment — ring fragment, cross, or parallel chords — that never resolves
-/// into an actual sign. (`Arrow` was dropped: unlike the others, a directional arrow reads as a
-/// real, functional sign — the same "single element resolves the whole scene" failure as the
-/// literal door and the leveled eyes.) The one constraint that used to be stated here, that a
-/// `RingFragment` never reaches a full circle, is now carried by `Sweep`.
-pub fn icon_shape(rng: &mut impl Rng) -> IconShape {
-    match rng.gen_range(0..3) {
-        0 => IconShape::RingFragment {
-            start_angle: rng.gen(),
-            sweep: rng.gen(),
-        },
-        1 => IconShape::Cross,
-        _ => IconShape::ParallelChords {
-            angle: rng.gen(),
-            chord_length: rng.gen_range(IconShape::length_range()),
-        },
-    }
-}
-
 impl IconShape {
+    pub fn sample(rng: &mut impl Rng) -> Self {
+        match rng.gen_range(0..3) {
+            0 => Self::RingFragment {
+                start_angle: rng.gen(),
+                sweep: rng.gen(),
+            },
+            1 => Self::Cross,
+            _ => Self::ParallelChords {
+                angle: rng.gen(),
+                chord_length: rng.gen_range(Self::length_range()),
+            },
+        }
+    }
+
     fn length_range() -> RangeInclusive<f64> {
         2.0 * (1.0 / 8.0 * TAU).cos()..=2.0 * (1.0 / 16.0 * TAU).cos()
     }
@@ -342,7 +345,7 @@ impl IconShape {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SevenSegment {
-    pub segments: [bool; 7], // a, b, c, d, e, f, g (standard 7-segment layout)
+    segments: [bool; 7], // a, b, c, d, e, f, g (standard 7-segment layout)
 }
 
 // standard 7-segment encodings for 0-9, the hex letters A-F (lowercase b/d, as on real
@@ -375,40 +378,24 @@ const REAL_CHARACTER_SEGMENTS: [[bool; 7]; 21] = [
     [false, true, true, true, false, true, false],   // リ
 ];
 
-#[derive(Debug, Clone, PartialEq)]
+/// A row of broken seven-segment cells, to read as a failing meter display rather than as an
+/// actual number.
+///
+/// No cell's pattern matches any real digit, hex letter, or other recognizable character caught so
+/// far. The fields are private and `sample` is the only way in, so that holds of every `Digits`
+/// there is — but only as far as `REAL_CHARACTER_SEGMENTS` reaches, and that table is best-effort
+/// rather than exhaustive. The enforcement is airtight; the predicate it enforces is not.
+///
 /// Every length here is in cell widths, a cell being one by definition, so nothing in this type is
 /// in pixels. `render` multiplies by whatever a cell is worth on its canvas. `cell` names the
 /// character, as it does in `GlyphWord`.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Digits {
     /// How wide a lit segment is drawn, in cell widths.
     thickness: f64,
-    pub cells: Vec<SevenSegment>,
+    cells: Vec<SevenSegment>,
     /// Space between one cell and the next, in cell widths.
     digit_gap: f64,
-}
-
-/// A row of `count` broken 7-segment-style cells. Each cell's pattern is guaranteed to NOT
-/// match any real digit, hex letter, or other recognizable character we've caught so far (see
-/// `REAL_CHARACTER_SEGMENTS`) — it should read as a broken meter display, never an actual
-/// character. This list is best-effort, not exhaustive.
-pub fn digits(rng: &mut impl Rng) -> Digits {
-    let mut cells: Vec<SevenSegment> = vec![
-        SevenSegment {
-            segments: [false; 7]
-        };
-        rng.gen_range(Digits::DIGITS_LENGTH_RANGE)
-    ];
-    for cell in cells.iter_mut() {
-        while cell.segments.iter().all(|f| !*f) || REAL_CHARACTER_SEGMENTS.contains(&cell.segments)
-        {
-            rng.fill(&mut cell.segments);
-        }
-    }
-    Digits {
-        thickness: Digits::DIGIT_WIDTH * rng.gen_range(Digits::THICKNESS_RATIO_RANGE),
-        cells,
-        digit_gap: Digits::DIGIT_WIDTH * rng.gen_range(Digits::DIGIT_GAP_RATIO_RANGE),
-    }
 }
 
 impl Digits {
@@ -432,6 +419,27 @@ impl Digits {
     /// Space between cells, in cell widths. Reaching zero would run the readout into one block; a
     /// full cell width is where it stops being one readout.
     const DIGIT_GAP_RATIO_RANGE: RangeInclusive<f64> = 0.1..=1.0;
+
+    pub fn sample(rng: &mut impl Rng) -> Self {
+        let mut cells: Vec<SevenSegment> = vec![
+            SevenSegment {
+                segments: [false; 7]
+            };
+            rng.gen_range(Self::DIGITS_LENGTH_RANGE)
+        ];
+        for cell in cells.iter_mut() {
+            while cell.segments.iter().all(|f| !*f)
+                || REAL_CHARACTER_SEGMENTS.contains(&cell.segments)
+            {
+                rng.fill(&mut cell.segments);
+            }
+        }
+        Self {
+            thickness: Self::DIGIT_WIDTH * rng.gen_range(Self::THICKNESS_RATIO_RANGE),
+            cells,
+            digit_gap: Self::DIGIT_WIDTH * rng.gen_range(Self::DIGIT_GAP_RATIO_RANGE),
+        }
+    }
 
     /// Across the whole readout, and down it, in cell widths. `render` asks `ref_point` for a
     /// rectangle this size and then draws `segments` inside it, so the two have to describe one
@@ -529,7 +537,7 @@ mod tests {
     fn eyes_are_never_level() {
         let mut rng = StdRng::seed_from_u64(1);
         for _ in 0..500 {
-            let e = eyes(&mut rng);
+            let e = EyeMarks::sample(&mut rng);
             assert_ne!(
                 e.dy(),
                 0.0,
@@ -550,7 +558,7 @@ mod tests {
     fn the_marks_fill_the_pair_they_are_reported_as_filling() {
         let mut rng = StdRng::seed_from_u64(11);
         for _ in 0..500 {
-            let e = eyes(&mut rng);
+            let e = EyeMarks::sample(&mut rng);
             let marks = e.marks();
 
             let left = marks.iter().map(|&(x, ..)| x).fold(f64::MAX, f64::min);
@@ -590,7 +598,7 @@ mod tests {
     fn every_dot_lands_inside_the_word_it_is_reported_as_filling() {
         let mut rng = StdRng::seed_from_u64(12);
         for _ in 0..500 {
-            let word = glyph_word(&mut rng);
+            let word = GlyphWord::sample(&mut rng);
             let dots = word.dots();
 
             // A dot's far edge and the word's own extent are the same sum of the same terms in a
@@ -624,7 +632,7 @@ mod tests {
     fn glyph_cell_is_never_fully_empty() {
         let mut rng = StdRng::seed_from_u64(4);
         for _ in 0..500 {
-            let g = glyph_word(&mut rng);
+            let g = GlyphWord::sample(&mut rng);
             assert_eq!(g.filled[0].len(), g.cols * g.rows);
             assert!(
                 g.filled[0].iter().any(|&f| f),
@@ -638,7 +646,7 @@ mod tests {
         // matches the original demo's asemic-character shape: 2-3 cols, 3-4 rows
         let mut rng = StdRng::seed_from_u64(5);
         for _ in 0..500 {
-            let g = glyph_word(&mut rng);
+            let g = GlyphWord::sample(&mut rng);
             assert!(
                 GlyphWord::COL_RANGE.contains(&g.cols),
                 "cols {} out of range",
@@ -656,7 +664,7 @@ mod tests {
     fn glyph_words_produces_exactly_count_characters_all_non_empty() {
         let mut rng = StdRng::seed_from_u64(9);
         for _ in 0..500 {
-            let g = glyph_word(&mut rng);
+            let g = GlyphWord::sample(&mut rng);
             for (i, grid) in g.filled.iter().enumerate() {
                 assert_eq!(grid.len(), g.cols * g.rows);
                 assert!(
@@ -672,7 +680,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(6);
         let mut saw_ring_fragment = false;
         for _ in 0..500 {
-            if let IconShape::RingFragment { sweep, .. } = icon_shape(&mut rng) {
+            if let IconShape::RingFragment { sweep, .. } = IconShape::sample(&mut rng) {
                 let sweep = sweep.radians();
                 saw_ring_fragment = true;
                 assert!(
@@ -699,7 +707,7 @@ mod tests {
             let IconShape::ParallelChords {
                 angle,
                 chord_length,
-            } = icon_shape(&mut rng)
+            } = IconShape::sample(&mut rng)
             else {
                 continue;
             };
@@ -729,7 +737,7 @@ mod tests {
             let IconShape::ParallelChords {
                 angle,
                 chord_length,
-            } = icon_shape(&mut rng)
+            } = IconShape::sample(&mut rng)
             else {
                 continue;
             };
@@ -768,7 +776,7 @@ mod tests {
     fn digits_never_match_a_real_digit() {
         let mut rng = StdRng::seed_from_u64(8);
         for _ in 0..500 {
-            let d = digits(&mut rng);
+            let d = Digits::sample(&mut rng);
             for cell in &d.cells {
                 assert!(
                     !REAL_CHARACTER_SEGMENTS.contains(&cell.segments),

@@ -12,7 +12,7 @@ use rand::{seq::SliceRandom, Rng};
 use tiny_skia::{BlendMode, Color, Paint, PathBuilder, Pixmap, Point, Rect, Stroke, Transform};
 
 use crate::{
-    dreamcore::{digits, eyes, glyph_word, icon_shape, IconShape},
+    dreamcore::{Digits, EyeMarks, GlyphWord, IconShape},
     flow::{advect_rk2, curl_velocity},
     noise::GradientNoise,
     palette::{Palette, Rgb},
@@ -554,7 +554,7 @@ pub fn render_dreamcore<R: Rng>(
         ));
         match rng.gen_range(0..4) {
             0 => {
-                let eyes = eyes(rng);
+                let eyes = EyeMarks::sample(rng);
                 // Size of one mark, as how many would fit across the short side. Small enough to
                 // read as a detail rather than as the subject — the style wants fragments, and a
                 // pair of eyes large enough to be looked *at* resolves the scene.
@@ -587,7 +587,7 @@ pub fn render_dreamcore<R: Rng>(
                 }
             }
             1 => {
-                let glyph_word = glyph_word(rng);
+                let glyph_word = GlyphWord::sample(rng);
 
                 // Size of one *dot*, as how many would fit across the short side — so a cell is
                 // three to five of these across and a whole word far more, which is why this range
@@ -621,7 +621,7 @@ pub fn render_dreamcore<R: Rng>(
                 }
             }
             2 => {
-                let icon_shape = icon_shape(rng);
+                let icon_shape = IconShape::sample(rng);
 
                 // Nominal size of an icon, as how many would fit across the short side. The
                 // coarsest of the four kinds by an order of magnitude: a pictogram is read as one
@@ -741,7 +741,7 @@ pub fn render_dreamcore<R: Rng>(
                 }
             }
             _ => {
-                let digits = digits(rng);
+                let digits = Digits::sample(rng);
 
                 // Width of one cell, as how many would fit across the short side. Between the
                 // icons and the glyphs: a readout is meant to be legible as a display, which a
