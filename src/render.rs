@@ -92,11 +92,19 @@ pub fn render_flow(
     let warp_x = GradientNoise::new(rng.next_u64());
     let warp_y = GradientNoise::new(rng.next_u64());
 
+    // Sampled on the wash's own lattice, and the displacement it returns is in that lattice's
+    // units — the two are the same choice, not two. The bound being derived is how far the warp may
+    // move a wash coordinate per pixel, so measuring it anywhere but on the wash lattice would
+    // leave the number expressed in units it was not measured in. `max_warp_step` never sees a
+    // scale; this closure is the only place the grid is picked.
     let (dq_max, dq_typ) = max_warp_step(
-        &warp_x,
-        &warp_y,
-        wash_scale,
-        warp_octaves,
+        |col: usize, row: usize| {
+            let (x, y) = (col as f64 * wash_scale, row as f64 * wash_scale);
+            (
+                warp_x.fbm(x, y, warp_octaves),
+                warp_y.fbm(x, y, warp_octaves),
+            )
+        },
         width as usize,
         height as usize,
     );
@@ -316,10 +324,7 @@ fn octave_range(scale: f64, min_wh: f64) -> RangeInclusive<u32> {
 /// share of the canvas allowed past Nyquist. The upper tail is tight enough that it would barely
 /// move the answer.
 fn max_warp_step(
-    warp_x: &GradientNoise,
-    warp_y: &GradientNoise,
-    scale: f64,
-    warp_octaves: u32,
+    warp: impl Fn(usize, usize) -> (f64, f64),
     width: usize,
     height: usize,
 ) -> (f64, f64) {
@@ -329,11 +334,7 @@ fn max_warp_step(
     let mut count = 0usize;
     for row in 0..height {
         for col in 0..width {
-            let (x, y) = (col as f64 * scale, row as f64 * scale);
-            curr_q[col] = (
-                warp_x.fbm(x, y, warp_octaves),
-                warp_y.fbm(x, y, warp_octaves),
-            );
+            curr_q[col] = warp(col, row);
             if col > 0 {
                 let dq =
                     (curr_q[col].0 - curr_q[col - 1].0).hypot(curr_q[col].1 - curr_q[col - 1].1);
