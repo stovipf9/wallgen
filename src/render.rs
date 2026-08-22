@@ -182,7 +182,8 @@ pub fn render_flow(
     let dir = |x, y| curl_velocity(potential, x, y, eps);
     let step_length = streamline_step_length(scale, octaves);
     let mut stream_color = to_color(
-        *palette.all()[8..]
+        *palette
+            .accents()
             .choose(rng)
             .expect("stream color should be determined"),
     );
@@ -573,7 +574,8 @@ pub fn render_dreamcore<R: Rng>(
     for _ in 0..fragment_count {
         let mut paint = Paint::default();
         paint.set_color(to_color(
-            *palette.all()[8..]
+            *palette
+                .accents()
                 .choose(rng)
                 .expect("color should be determined"),
         ));
