@@ -88,6 +88,24 @@ pub fn render_flow(
     let wash_octaves = rng.gen_range(wash_octave_range.clone());
     let warp_octaves = rng.gen_range(*wash_octave_range.start()..=wash_octaves);
 
+    // Where in the lattice to start sampling, added to every field below. Without it every render
+    // begins at a lattice node, and gradient noise is exactly zero at every node — so the top-left
+    // pixel's wash was always the midpoint of the background and the wash shade, one of two values
+    // over any number of seeds. A pixel no seed can move is the wrong thing for a generator to
+    // have. It is only that: measuring said the field is no flatter at the origin than anywhere
+    // else, so nothing about the rest of the image is expected to change (#6).
+    //
+    // Two independent draws, not one used twice — a single offset would put the origin on the
+    // diagonal from every render's corner, the same collapse the warp fields avoid by being
+    // independent rather than offset copies.
+    //
+    // One cell is the whole space: the lattice repeats, so an offset past 1 only picks a different
+    // cell. The wash and the streamlines share the value while sampling at different scales, which
+    // makes it the same offset in lattice units and a different distance in each — no matter, since
+    // all either needs is to start somewhere arbitrary.
+    const OFFSET_RANGE: Range<f64> = 0.0..1.0;
+    let offset = (rng.gen_range(OFFSET_RANGE), rng.gen_range(OFFSET_RANGE));
+
     let warp_noise = GradientNoise::new(rng.next_u64());
     let warp_x = GradientNoise::new(rng.next_u64());
     let warp_y = GradientNoise::new(rng.next_u64());
@@ -99,7 +117,10 @@ pub fn render_flow(
     // scale; this closure is the only place the grid is picked.
     let (dq_max, dq_typ) = max_warp_step(
         |col: usize, row: usize| {
-            let (x, y) = (col as f64 * wash_scale, row as f64 * wash_scale);
+            let (x, y) = (
+                col as f64 * wash_scale + offset.0,
+                row as f64 * wash_scale + offset.1,
+            );
             (
                 warp_x.fbm(x, y, warp_octaves),
                 warp_y.fbm(x, y, warp_octaves),
@@ -127,8 +148,8 @@ pub fn render_flow(
     };
 
     for (i_pixel, pixel) in pixmap.pixels_mut().iter_mut().enumerate() {
-        let x = (i_pixel % width as usize) as f64 * wash_scale;
-        let y = (i_pixel / width as usize) as f64 * wash_scale;
+        let x = (i_pixel % width as usize) as f64 * wash_scale + offset.0;
+        let y = (i_pixel / width as usize) as f64 * wash_scale + offset.1;
         let warped_potential =
             (1.0 + warp_noise.fbm(
                 x + warp_strength * warp_x.fbm(x, y, warp_octaves),
@@ -156,7 +177,7 @@ pub fn render_flow(
     let octaves = rng.gen_range(stream_octave_range.clone());
 
     let noise = GradientNoise::new(rng.next_u64());
-    let potential = |x: f64, y: f64| noise.fbm(x * scale, y * scale, octaves);
+    let potential = |x: f64, y: f64| noise.fbm(x * scale + offset.0, y * scale + offset.1, octaves);
     let eps = curl_eps(scale, octaves);
     let dir = |x, y| curl_velocity(potential, x, y, eps);
     let step_length = streamline_step_length(scale, octaves);
