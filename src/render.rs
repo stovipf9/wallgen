@@ -3,7 +3,7 @@
 
 use std::{
     f32::consts::TAU,
-    f64::consts::PI,
+    f64::consts::{PI, SQRT_2},
     mem::swap,
     ops::{Range, RangeInclusive},
 };
@@ -18,11 +18,39 @@ use crate::{
     palette::{Palette, Rgb},
 };
 
-/// Features the streamline potential fits across the short side. Under one across the frame by
-/// design — the wash's range starts where this one ends — so the streamlines follow a field far
-/// larger than the canvas and read as fragments of it rather than as a repeating texture. At
-/// module scope so the tests can sweep the scales the layer can actually reach.
+/// Vortices the streamline potential fits across the short side. Under one across the frame by
+/// design, so the streamlines follow a field far larger than the canvas and read as fragments of it
+/// rather than as a repeating texture. At module scope so the tests can sweep the scales the layer
+/// can actually reach.
 const VORTEX_PER_SCREEN_RANGE: RangeInclusive<f64> = 0.15..=1.0;
+
+/// The wash's own count, in the same unit. Explained where it is drawn, in `render_flow`; at module
+/// scope for the same reason as the one above.
+const WASH_CELLS_PER_SCREEN_RANGE: RangeInclusive<f64> = 1.0..=64.0;
+
+/// How many cells of the streamline field's *finest* octave may cross the short side — the two
+/// above count the coarsest one, and this counts the last. It is what the octave count is asked for
+/// through `octave_ceiling`, so that a coarse field may sum more octaves than a fine one and both
+/// end up equally detailed on screen.
+///
+/// A chosen number, and the file has no derivation to offer in its place. Three were looked for:
+///
+/// - The field's own amplitude, as `WASH_OCTAVE_TOP` gets for the wash. There is none here: `fbm`'s
+///   persistence and lacunarity are reciprocal by construction in `GradientNoise::fbm`, which is
+///   Hurst exponent 1, and there every octave contributes equally to the gradient (the same fact
+///   `streamline_step_length` derives its curvature from). Nothing decays, so nothing stops.
+/// - The stroke. Structure finer than a filament's own width does not vanish into it — it beads the
+///   line instead, so this end is where the layer starts looking wrong rather than where it stops
+///   paying, and looking wrong is not a limit that can be computed.
+/// - The integration step. `cell / step` crosses one near here, but that is
+///   `streamline_step_length` choosing four pixels, not the field or the eye: quartering the step
+///   leaves the same picture.
+///
+/// So it is judged by eye, like `WASH_CELLS_PER_SCREEN_RANGE`'s upper end. What was judged: at 512
+/// the top of the range is the point where a filament is just short of beading, and doubling it is
+/// past. Only the seeds that draw the top of the range render there — roughly one in ten — so this
+/// bounds how detailed the layer may get, not how detailed it usually is.
+const STREAM_CELLS_PER_SCREEN_TOP: f64 = 512.0;
 
 /// Curl-noise streamlines advected over a domain-warped fbm potential, drawn as tapered,
 /// additively-blended filaments — the opposite compositional philosophy from `render_dreamcore`,
@@ -63,31 +91,56 @@ pub fn render_flow(
         .choose(rng)
         .expect("wash_color cannot be empty");
 
-    // The wash gets its own feature scale, in the same unit as the streamlines' — how many
-    // features fit across the short side — so the two are directly comparable: the streamline
-    // field fits at most one feature across the frame, where the wash starts at one and runs all
-    // the way up to a feature per pixel.
+    // The wash gets its own cell count, in the same unit as the streamlines' — lattice cells of
+    // octave 1 across the short side — so the two layers are directly comparable.
     //
     // They used to share one `scale`, and then the domain warp was the only thing giving the wash
     // any texture at all: its local stretch worked out to exactly `wash_vortex / vortex`, so the
     // warp was doing a scale conversion rather than a distortion. That single overloading caused
     // both of the problems that took the longest to pin down — the wash flattening into a ramp as
-    // the vortex count was lowered (with under one feature across the frame there was nothing to
+    // the vortex count was lowered (with under one cell across the frame there was nothing to
     // see), and `warp_strength` having no determinable value (it was answering two questions at
     // once). Separating the scales leaves the warp as a distortion only.
     //
-    // Both ends belong to `octave_range`, restated in features per screen: under one across the
-    // frame the coarsest octave no longer fits, and at `min_wh` of them a cell is down to one
-    // pixel. Nothing between the two is privileged, so the draw is log-uniform over the span.
+    // Neither end is a limit. The lower one is where a texture starts being one: under a cell
+    // across the frame the wash has no repeat in view and reads as a ramp. That is a statement
+    // about what this layer is for and not about what can be drawn — the streamlines spend their
+    // whole range below it on purpose. The upper one is the finest a wash may be, judged by eye and
+    // stated as a count so that it means the same thing at every size. Nothing between the two is
+    // privileged, so the draw is log-uniform over the span.
     //
-    // The top is open rather than closed, because a cell of exactly one pixel is the sampling
-    // limit itself rather than a point inside it. `gen_range` over a half-open float range rejects
-    // any sample that lands on the end, so nothing has to be clamped afterwards.
-    let wash_cells = rng.gen_range(1f64.ln()..min_wh.ln()).exp();
-    let wash_scale = wash_cells / min_wh;
-    let wash_octave_range = octave_range(wash_cells, octave_ceiling(wash_cells, min_wh));
+    // Neither end is the pixel grid, and the grid is not idle either. It is `octave_ceiling` that
+    // meets it, on the octave count and after the draw: the finer the wash, the sooner its octaves
+    // reach a cell of one pixel, and the last of them are dropped. At the fine end of this range a
+    // 1080p canvas keeps five of the seven counts on offer.
+    //
+    // What the range must not contain is the canvas, and it is the count rather than the scale that
+    // makes that possible: a count means the same thing at every size, and holding it fixed holds
+    // the wash's texture fixed across resolutions. The resolution enters twice, and only after the
+    // draw — at `wash_scale`, turning the count into pixels, and at `octave_ceiling`, taking detail
+    // away (#5).
+    let wash_cells = rng
+        .gen_range(
+            WASH_CELLS_PER_SCREEN_RANGE.start().ln()..=WASH_CELLS_PER_SCREEN_RANGE.end().ln(),
+        )
+        .exp();
+    let wash_octave_range = octave_range(wash_cells, WASH_OCTAVE_TOP);
     let wash_octaves = rng.gen_range(wash_octave_range.clone());
+    // Never finer than the wash it distorts. A warp displaces the field; it does not add detail to
+    // it, and past `wash_octaves` it would: the finest structure in the output would come from this
+    // count rather than from the wash's own, leaving the parameter that reads as "how fine is the
+    // wash" no longer deciding that. It is the same overloading separating the two scales above
+    // removed, kept out of the octave counts as well.
+    //
+    // Aliasing is not what this end is for — the warp's own Nyquist limit is already `dq_max`'s
+    // business in `warp_strength_window`, and a pixel-grid ceiling here would not take this shape.
     let warp_octaves = rng.gen_range(*wash_octave_range.start()..=wash_octaves);
+
+    let wash_octaves_ceiling = octave_ceiling(wash_cells, min_wh).max(*wash_octave_range.start());
+    let wash_octaves = wash_octaves.min(wash_octaves_ceiling);
+    let warp_octaves = warp_octaves.min(wash_octaves_ceiling);
+
+    let wash_scale = wash_cells / min_wh;
 
     // Where in the lattice to start sampling, added to every field below. Without it every render
     // begins at a lattice node, and gradient noise is exactly zero at every node — so the top-left
@@ -138,8 +191,7 @@ pub fn render_flow(
     // `hi` come from measurements over the pixel grid and so depend on the resolution. Drawing
     // from them directly would shift the whole random sequence when the output size changes, and
     // one shifted draw is enough to make a different picture (#5). This way the randomness
-    // consumed is resolution-independent and only the value it maps to adapts. The `wash_octaves`
-    // and `warp_octaves` draws are still the old shape; #5 covers converting them.
+    // consumed is resolution-independent and only the value it maps to adapts.
     let (lo, hi) = warp_strength_window(wash_scale, dq_max, dq_typ);
     let u = rng.gen_range(0.0..=1.0);
     let warp_strength = if lo == 0.0 {
@@ -173,9 +225,14 @@ pub fn render_flow(
     let vortices = rng
         .gen_range(VORTEX_PER_SCREEN_RANGE.start().ln()..=VORTEX_PER_SCREEN_RANGE.end().ln())
         .exp();
+    let stream_octave_range = octave_range(
+        vortices,
+        octave_ceiling(vortices, STREAM_CELLS_PER_SCREEN_TOP),
+    );
+    let octaves = rng
+        .gen_range(stream_octave_range.clone())
+        .min(octave_ceiling(vortices, min_wh).max(*stream_octave_range.start()));
     let scale = vortices / min_wh;
-    let stream_octave_range = octave_range(vortices, octave_ceiling(vortices, min_wh));
-    let octaves = rng.gen_range(stream_octave_range.clone());
 
     let noise = GradientNoise::new(rng.next_u64());
     let potential = |x: f64, y: f64| noise.fbm(x * scale + offset.0, y * scale + offset.1, octaves);
@@ -284,23 +341,71 @@ pub fn render_flow(
     pixmap
 }
 
-/// Octave counts worth summing at a per-screen cell count, as an inclusive range. Both ends are
-/// limits rather than choices, and they close on each other as `cells` rises.
+/// The last octave count the wash is offered, on any canvas and in any palette. The streamlines
+/// take their own from `STREAM_CELLS_PER_SCREEN_TOP`: this bound is about a color being blended
+/// towards, and theirs is a field steering a stroke, so nothing here carries over.
 ///
-/// `fbm` sums octaves `1..=n`, and octave `k` has a lattice cell `2^(k-1)` times finer than the
-/// count it is given, so a count is bounded on both sides:
+/// Adding octave `n + 1` moves `fbm` twice: by the new term, and by the renormalization of the sum
+/// that term joins. Both moves are bounded by `(sqrt(2) / 2) * 2^-n / A(n + 1)`, where
+/// `A(n) = 2 - 2^(1-n)` is the amplitude `fbm` divides by and `sqrt(2) / 2` is the largest value
+/// that gradient noise with unit gradients can reach. The wash halves the result on the way through
+/// `(1 + fbm) / 2` and then scales it by the distance between the background and the wash shade, so
+/// one more octave moves a channel `delta` wide by at most `delta * sqrt(2) * 2^-(n+1) / A(n+1)` of
+/// that channel's steps.
+///
+/// A channel spans at most 255 of those steps, and `last_octave_a_channel_can_show` walks the bound
+/// down to where one more octave stops covering one. Every palette stops sooner than that, since
+/// `surfaces` is a shade off the background rather than its opposite — and that is a reason to
+/// leave the constant here rather than to narrow it to the palette in hand: what a seed asks for
+/// may not depend on which palette will render it, any more than it may depend on the canvas (#5).
+/// A palette takes detail away at the far end, the way the pixel grid does.
+///
+/// The two bounds above are worst cases that the field does not reach at the same point, so this
+/// lands one octave past where measurement puts the last visible one
+/// (`the_last_octave_offered_is_one_no_palette_can_show`). It stays where the derivation puts it:
+/// the measurement is a check on the derivation, not a source for it.
+const WASH_OCTAVE_TOP: u32 = last_octave_a_channel_can_show(255.0);
+
+/// The last octave whose own contribution still covers a step of a channel `delta` steps wide —
+/// the bound above, walked down rather than solved, since `log2` is not available to a `const`.
+///
+/// Halving `amplitude` each time around is `2^-octave`, which is both the octave's share of the sum
+/// and, doubled, what `A(octave) = 2 - 2^(1-octave)` subtracts from 2.
+///
+/// `saturating_sub` covers the case where not even the first octave clears a step, which needs a
+/// `delta` under `sqrt(2)`: a wash shade equal to the background. Nothing calls it with one, and a
+/// zero would be lifted by `octave_range`'s floor anyway, but a `const` that could underflow is a
+/// build that fails on a value rather than a range that comes out odd.
+const fn last_octave_a_channel_can_show(delta: f64) -> u32 {
+    let (mut octave, mut amplitude) = (1u32, 0.5);
+
+    loop {
+        if delta * SQRT_2 * amplitude / (2.0 - 2.0 * amplitude) < 1.0 {
+            return octave.saturating_sub(1);
+        }
+        octave += 1;
+        amplitude *= 0.5;
+    }
+}
+
+/// Octave counts a seed may ask for at a per-screen cell count, as an inclusive range. Neither end
+/// may depend on the output — what a given canvas can carry is `octave_ceiling`'s business, and it
+/// applies to the value drawn from here rather than to this range (#5).
 ///
 /// - `coarsest` — the first count with an octave small enough to fit inside the frame. Below it
 ///   every octave in the sum spans the whole image as a ramp rather than as texture, and it is
 ///   the coarsest one that carries the largest amplitude share. `cells` is how many lattice cells
 ///   of octave 1 span the short side, so `1 / cells` is that octave's cell measured in frames, and
 ///   the count that first brings one inside the frame follows from it alone.
-/// - `top` — where the octaves stop being worth summing, which is not a property of the field and
-///   so is not this function's to know. `octave_ceiling` is what every caller passes today.
+/// - `top` — the layer's own, since what ends a layer's detail is not the same question twice:
+///   `WASH_OCTAVE_TOP` is where the output's color depth stops carrying what was added, and
+///   `STREAM_CELLS_PER_SCREEN_TOP` is a fineness on screen, turned into a count by
+///   `octave_ceiling`. Only the floor is shared, which is why only the floor is computed here.
 ///
-/// `top.max(coarsest)` never actually fires, and is kept only so the range cannot come out empty by
-/// inspection. What already prevents it is the cast in `octave_ceiling`, which floors at 1 — where
-/// `coarsest` already is unless a lattice cell is wider than the whole canvas.
+/// `top.max(coarsest)` cannot come out empty, and with either layer's top it never fires either:
+/// `coarsest` passes even the lower of the two, 7, only under `2^-6` cells across the frame, and
+/// the lowest either layer draws is `VORTEX_PER_SCREEN_RANGE`'s 0.15, which lands on four. It is
+/// kept so that reading the line is enough to know the range is non-empty.
 fn octave_range(cells: f64, top: u32) -> RangeInclusive<u32> {
     let dead = (1.0 / cells).log2().max(0.0).ceil() as u32;
     let coarsest = dead + 1;
@@ -308,20 +413,31 @@ fn octave_range(cells: f64, top: u32) -> RangeInclusive<u32> {
     coarsest..=top.max(coarsest)
 }
 
-/// The most octaves this canvas can carry: the last count whose finest octave still has a cell of
-/// at least one pixel. Gradient noise is zero at every lattice node with its extremum mid-cell, so
-/// a cell is half a period, and one more octave puts the period under two pixels — past there the
-/// sum is a picture of the sampling rather than of the field.
+/// The last octave count whose finest octave still has at most `cells_per_screen` cells across the
+/// short side — the largest `n` with `cells * 2^(n-1)` under that.
 ///
-/// Split out of `octave_range` because the two ends answer different questions. The floor is a
-/// property of the field and holds whatever it is drawn on; this end is a property of the output
-/// and nothing else, and separating them is what lets a later change move one without the other.
+/// Two things ask it, and the difference between them is the whole of what the second argument
+/// means. The pixel grid asks with `min_wh`, which is one cell per pixel: gradient noise is zero at
+/// every lattice node with its extremum mid-cell, so a cell is half a period, and one more octave
+/// puts the period under two pixels — past there the sum is a picture of the sampling rather than
+/// of the field. `STREAM_CELLS_PER_SCREEN_TOP` asks with a count that has nothing to do with any
+/// canvas. Both are the same question, "how fine may the last octave be", and a pixel count is only
+/// the particular answer a canvas gives.
+///
+/// Which of the two may reach the *range* and which may only reach the drawn value follows from
+/// that, and not from this function. A canvas may not: `fbm` sums `1..=n`, so a count reduced after
+/// the draw is the same field with its last layers missing, which is how a smaller canvas loses
+/// detail off the fine end instead of drawing a different picture, and folding it into the range
+/// instead would move where the draw lands and — through the width of the range an integer
+/// `gen_range` rejection-samples over — how much of the stream it spends (#5).
 ///
 /// The cast is what stops it from running backwards: `log2` of a cell under a pixel is negative, a
 /// negative float saturates to 0 on the way to `u32`, and the result lands on 1. Removing it, or
-/// reaching for a wrapping one, is what would open the hole this looks like it plugs.
-fn octave_ceiling(cells: f64, min_wh: f64) -> u32 {
-    (min_wh / cells).log2().floor() as u32 + 1
+/// reaching for a wrapping one, is what would open the hole this looks like it plugs. It can still
+/// come out under `octave_range`'s floor on a canvas narrower than one lattice cell, so callers
+/// take the `max` with it.
+fn octave_ceiling(cells: f64, cells_per_screen: f64) -> u32 {
+    (cells_per_screen / cells).log2().floor() as u32 + 1
 }
 
 /// How far apart the domain warp moves the sample points of two adjacent pixels, at unit warp
@@ -335,7 +451,7 @@ fn octave_ceiling(cells: f64, min_wh: f64) -> u32 {
 ///   lattice units, and Nyquist puts the sampling step at one. Past that the field is not
 ///   represented in the output, and it is the worst pixel that decides — hence an extremum.
 ///
-///   The coarsest octave, where `octave_range` takes its ceiling from the finest. The two are
+///   The coarsest octave, where `octave_ceiling` bounds on the finest. The two are
 ///   bounding different things and the ends follow from that. There, the question is how many
 ///   octaves may be summed before one of them is finer than the grid, which the last one added
 ///   settles. Here, the sum is already fixed and the question is how far the sample points may be
@@ -496,17 +612,16 @@ fn curl_eps(scale: f64, octaves: u32) -> f64 {
 /// Unlike `curl_eps` there is no optimum to find — both error sources shrink together as the step
 /// shrinks, so this is cost against quality and some chosen number is unavoidable. A forgiving one:
 /// the step goes as the square root of `SCALE_PX`, so a decade of it buys a factor of about three,
-/// while `octave_range` spans roughly `log2(min_wh)` counts and the step goes as
-/// `2^(-octaves/2)` — so the octave count alone moves it by around the square root of the short
-/// side, which at any usable canvas is the larger term by far.
+/// while the octave count spans nine or ten and the step goes as `2^(-octaves/2)` — so the count
+/// alone moves it by a factor of sixteen or more, which is the larger term by far.
 ///
 /// The figure is absolute, deliberately not scaled by the stroke width: a lateral deviation
 /// displaces both edges of a stroke equally whatever its width, and thickness hides structure
 /// *inside* a line, not displacement *of* the line.
 ///
-/// It also assumes there is a well-defined curve to approximate, which holds only under
-/// `octave_range`'s ceiling — above it the radius of curvature drops below a pixel and a smaller
-/// step chases detail the saddle points amplify into a different macro path.
+/// It also assumes there is a well-defined curve to approximate, which holds only under the octave
+/// count `STREAM_CELLS_PER_SCREEN_TOP` allows — above that the radius of curvature drops below a
+/// pixel and a smaller step chases detail the saddle points amplify into a different macro path.
 fn streamline_step_length(scale: f64, octaves: u32) -> f64 {
     const SCALE_PX: f64 = 4.0;
 
@@ -876,44 +991,46 @@ colors:
         );
     }
 
-    /// Size of one lattice cell of `octave`, in pixels — the quantity both ends of `octave_range`
-    /// are stated in.
+    /// Size of one lattice cell of `octave`, in pixels — the quantity `octave_range`'s floor and
+    /// `octave_ceiling` are both stated in.
     fn cell_px(scale: f64, octave: u32) -> f64 {
         1.0 / (scale * 2f64.powi(octave as i32 - 1))
     }
 
-    /// Every `(min_wh, cells, octaves)` a layer can actually draw, given the per-screen cell count
-    /// it draws from. Sampling the count log-uniformly matches how `render_flow` draws it.
+    /// Every `(min_wh, cells, octaves)` a layer can actually reach, given the per-screen cell count
+    /// it draws from. Sampling the count log-uniformly matches how `render_flow` draws it, and both
+    /// ends of the range are sampled because the quantities these cases feed are monotone in the
+    /// count, so only the ends can bind.
     ///
-    /// `top_is_drawable` mirrors whether that draw is over a closed or a half-open range, and it
-    /// has to: the top of the wash's range is the sampling limit itself, so the difference between
-    /// landing on it and stopping one f64 short of it is the whole point of the range being
-    /// half-open. Hence the top sample is the last representable value below the end, not a
-    /// fraction of the way along — a coarser sweep would step over the boundary being tested.
+    /// `octave_ceiling` is applied here for the same reason `render_flow` applies it: the counts
+    /// that reach a field are the drawn ones after the canvas has taken its share, and a sweep over
+    /// `octave_range` alone would be a sweep over counts no canvas in `SHORT_SIDES` ever sums.
+    /// Every count from the floor up to that ceiling is reachable, since the draw is uniform over a
+    /// range that reaches past it and everything above collapses onto it.
+    ///
+    /// `top` is the layer's own, and the two layers do not take the same shape of one: the wash's
+    /// is a constant, the streamlines' is read off their cell count. Passing it in is what keeps
+    /// this from having to know which layer it is sweeping.
     fn reachable(
-        vortex_range: impl Fn(f64) -> (f64, f64),
-        top_is_drawable: bool,
+        cell_range: RangeInclusive<f64>,
+        top: impl Fn(f64) -> u32,
     ) -> Vec<(f64, f64, u32)> {
-        // How finely the vortex count is sampled. Anything past a handful is enough — the
-        // quantities these cases feed are monotone in it, so only the ends can bind.
+        // How finely the cell count is sampled. Anything past a handful is enough.
         const STEPS: u32 = 16;
 
         let mut cases = Vec::new();
         for min_wh in SHORT_SIDES {
-            let (lo, hi) = vortex_range(min_wh);
-            let (lo, hi) = (lo.ln(), hi.ln());
-            let top = if top_is_drawable {
-                hi
-            } else {
-                f64::from_bits(hi.to_bits() - 1)
-            };
+            let (lo, hi) = (cell_range.start().ln(), cell_range.end().ln());
 
-            for i in 0..STEPS {
-                let cells_ln = lo + (hi - lo) * i as f64 / STEPS as f64;
-                for cells in [cells_ln.exp(), top.exp()] {
-                    for octaves in octave_range(cells, octave_ceiling(cells, min_wh)) {
-                        cases.push((min_wh, cells, octaves));
-                    }
+            for i in 0..=STEPS {
+                let cells = (lo + (hi - lo) * i as f64 / STEPS as f64).exp();
+                let range = octave_range(cells, top(cells));
+                let reached = octave_ceiling(cells, min_wh)
+                    .max(*range.start())
+                    .min(*range.end());
+
+                for octaves in *range.start()..=reached {
+                    cases.push((min_wh, cells, octaves));
                 }
             }
         }
@@ -921,20 +1038,20 @@ colors:
         cases
     }
 
+    /// The floor, which `octave_range` takes from the cell count alone — so any top at all gives
+    /// the same answer, and this asks for the one that cannot bind.
+    fn coarsest_octave(cells: f64) -> u32 {
+        *octave_range(cells, u32::MAX).start()
+    }
+
     fn streamline_cases() -> Vec<(f64, f64, u32)> {
-        reachable(
-            |_| {
-                (
-                    *VORTEX_PER_SCREEN_RANGE.start(),
-                    *VORTEX_PER_SCREEN_RANGE.end(),
-                )
-            },
-            true,
-        )
+        reachable(VORTEX_PER_SCREEN_RANGE, |cells| {
+            octave_ceiling(cells, STREAM_CELLS_PER_SCREEN_TOP)
+        })
     }
 
     fn wash_cases() -> Vec<(f64, f64, u32)> {
-        reachable(|min_wh| (1.0, min_wh), false)
+        reachable(WASH_CELLS_PER_SCREEN_RANGE, |_| WASH_OCTAVE_TOP)
     }
 
     /// The floor. Octave 1 is always the coarsest one in the sum and its cell can be several
@@ -946,7 +1063,7 @@ colors:
     fn every_reachable_octave_count_starts_inside_the_frame() {
         for (min_wh, cells, _) in streamline_cases().into_iter().chain(wash_cases()) {
             let scale = cells / min_wh;
-            let coarsest = *octave_range(cells, octave_ceiling(cells, min_wh)).start();
+            let coarsest = coarsest_octave(cells);
             let cell = cell_px(scale, coarsest);
             assert!(
                 cell <= min_wh,
@@ -956,19 +1073,134 @@ colors:
         }
     }
 
-    /// The ceiling, and the reason it is not `top.max(coarsest)` doing the work: a cell of under a
-    /// pixel puts the octave's period under two and the sum stops representing the field.
-    /// This is what fails if `VORTEX_PER_SCREEN_RANGE` or the wash's range is opened too far.
+    /// What the canvas is allowed to do to a count, which is take some away and never add: every
+    /// short side reaches a prefix of the same range, and a longer one reaches at least as far.
+    ///
+    /// This is the shape #5 asks for, in the only form a test can hold. That the *range* has no
+    /// canvas in it cannot be asserted — `octave_range` and the tops handed to it take no short
+    /// side, so a sweep over `SHORT_SIDES` would compare a value against itself. What is left, and
+    /// what breaks if a canvas ever reaches the range again, is the direction: detail comes off the
+    /// fine end as the canvas shrinks, and nothing else moves.
+    ///
+    /// `SHORT_SIDES` is ascending, which is what lets the check be a running maximum.
+    #[test]
+    fn a_smaller_canvas_only_takes_octaves_off_the_top() {
+        for cases in [streamline_cases(), wash_cases()] {
+            // `(cells, short side, the highest octave that short side reaches)`.
+            let mut reached: Vec<(f64, f64, u32)> = Vec::new();
+            for (min_wh, cells, octaves) in cases {
+                match reached
+                    .iter_mut()
+                    .find(|(c, m, _)| *c == cells && *m == min_wh)
+                {
+                    Some((_, _, top)) => *top = (*top).max(octaves),
+                    None => reached.push((cells, min_wh, octaves)),
+                }
+            }
+            assert!(!reached.is_empty());
+            // `reachable` walks the short sides outermost, so the entries for one cell count are
+            // scattered; bring them together before comparing neighbors.
+            reached.sort_by(|a, b| (a.0, a.1).partial_cmp(&(b.0, b.1)).unwrap());
+
+            for window in reached.windows(2) {
+                let ((cells, smaller, fewer), (_, larger, more)) = (window[0], window[1]);
+                if window[0].0 != window[1].0 {
+                    continue;
+                }
+                assert!(
+                    fewer <= more,
+                    "cells={cells} reaches octave {fewer} on a {smaller}px short side but only \
+                     {more} on a {larger}px one, so the canvas is adding rather than taking away"
+                );
+            }
+        }
+    }
+
+    /// The ceiling: a cell of under a pixel puts the octave's period under two, and the sum stops
+    /// representing the field. Every count, not just the top one — the draw can land anywhere in
+    /// the range, and what the assertion is about is the cell size of the last octave summed.
+    ///
+    /// `octave_range` no longer carries this end, so what this pins is `octave_ceiling` against the
+    /// pixel size it is stated in. That the *drawn* count is put through it is `render_flow`'s to
+    /// get right and is not reachable from here; `reachable` applies it the same way, and a sweep
+    /// that did not would be sweeping counts nothing renders.
     #[test]
     fn every_reachable_octave_count_stops_at_the_pixel_grid() {
-        for (min_wh, cells, _) in streamline_cases().into_iter().chain(wash_cases()) {
+        for (min_wh, cells, octaves) in streamline_cases().into_iter().chain(wash_cases()) {
             let scale = cells / min_wh;
-            let finest = octave_ceiling(cells, min_wh);
-            let cell = cell_px(scale, finest);
+            let cell = cell_px(scale, octaves);
             assert!(
                 cell >= 1.0,
-                "finest octave {finest} has a {cell}px cell, under one pixel (scale={scale}, \
+                "octave {octaves} has a {cell}px cell, under one pixel (scale={scale}, \
                  min_wh={min_wh})"
+            );
+        }
+    }
+
+    /// Largest move one more octave makes to `(1 + fbm) / 2`, in steps of a channel `delta` wide.
+    ///
+    /// Sampled in lattice units rather than over a canvas, because what is being measured is the
+    /// field's own amplitude and it does not care where the wash lands on it. The step is fine
+    /// enough for several samples per cell of the octave being added — its extremum sits mid-cell,
+    /// so a step near the cell size would report whatever it happened to land on.
+    fn one_more_octave_in_steps(seed: u64, octaves: u32, delta: f64) -> f64 {
+        const SIDE: u32 = 256;
+        const STEP: f64 = 1.0 / SIDE as f64;
+
+        let noise = GradientNoise::new(seed);
+        let origin = seed as f64 * 0.31;
+        let mut max = 0f64;
+        for i in 0..SIDE {
+            for j in 0..SIDE {
+                let (x, y) = (origin + i as f64 * STEP, origin + j as f64 * STEP);
+                let moved = noise.fbm(x, y, octaves + 1) - noise.fbm(x, y, octaves);
+                max = max.max(moved.abs() / 2.0);
+            }
+        }
+        max * delta
+    }
+
+    /// What `WASH_OCTAVE_TOP` claims, measured rather than modelled — the amplitude model is what
+    /// the constant inverts, so asserting the model back would prove nothing. Two claims, and they
+    /// do not carry the same weight, because a sampled maximum can only fall short of the real one:
+    ///
+    /// - Nothing past it reaches any palette, 255 being the widest a channel can be. **A pass here
+    ///   is not a proof.** A grid that misses the worst point reports too little and the assertion
+    ///   holds anyway, so what this catches is a derivation wrong by a wide margin — gradient noise
+    ///   swinging further than `sqrt(2) / 2`, `fbm` normalizing by something other than `A(n)` —
+    ///   and not one wrong at the boundary. The derivation is what carries this claim; this is the
+    ///   net under it.
+    /// - It is not more than two octaves loose. This one does hold: falling short only makes it
+    ///   harder to pass, so a measured move of over a step is a real one.
+    ///
+    /// The second is stated at `WASH_OCTAVE_TOP - 2` rather than at the count itself because the
+    /// bounds the derivation adds up are worst cases the field does not reach at the same point,
+    /// which leaves the constant one octave past where measurement puts the last visible one. Being
+    /// loose by one costs an octave nothing can see; tightening it against these numbers is reading
+    /// the constant off a measurement instead of deriving it, and would move with whatever field
+    /// the sweep happened to sample.
+    ///
+    /// Several seeds because one field could be flat where another is not, and this is a claim
+    /// about the noise rather than about a field.
+    #[test]
+    fn the_last_octave_offered_is_one_no_palette_can_show() {
+        const WIDEST_CHANNEL: f64 = 255.0;
+
+        for seed in [7, 11, 23] {
+            let past = one_more_octave_in_steps(seed, WASH_OCTAVE_TOP, WIDEST_CHANNEL);
+            assert!(
+                past < 1.0,
+                "octave {} moves a 255-wide channel by {past:.3} steps, so the range stops too \
+                 early to be past what any palette shows (seed={seed})",
+                WASH_OCTAVE_TOP + 1
+            );
+
+            let inside = one_more_octave_in_steps(seed, WASH_OCTAVE_TOP - 2, WIDEST_CHANNEL);
+            assert!(
+                inside > 1.0,
+                "octave {} moves a 255-wide channel by only {inside:.3} steps, so the range runs \
+                 more than an octave past what any palette shows (seed={seed})",
+                WASH_OCTAVE_TOP - 1
             );
         }
     }
