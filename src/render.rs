@@ -83,8 +83,9 @@ pub fn render_flow(
     // The top is open rather than closed, because a cell of exactly one pixel is the sampling
     // limit itself rather than a point inside it. `gen_range` over a half-open float range rejects
     // any sample that lands on the end, so nothing has to be clamped afterwards.
-    let wash_scale = rng.gen_range(1f64.ln()..min_wh.ln()).exp() / min_wh;
-    let wash_octave_range = octave_range(wash_scale, min_wh);
+    let wash_cells = rng.gen_range(1f64.ln()..min_wh.ln()).exp();
+    let wash_scale = wash_cells / min_wh;
+    let wash_octave_range = octave_range(wash_cells, octave_ceiling(wash_cells, min_wh));
     let wash_octaves = rng.gen_range(wash_octave_range.clone());
     let warp_octaves = rng.gen_range(*wash_octave_range.start()..=wash_octaves);
 
@@ -169,11 +170,11 @@ pub fn render_flow(
         .to_color_u8();
     }
 
-    let scale = rng
+    let vortices = rng
         .gen_range(VORTEX_PER_SCREEN_RANGE.start().ln()..=VORTEX_PER_SCREEN_RANGE.end().ln())
-        .exp()
-        / min_wh;
-    let stream_octave_range = octave_range(scale, min_wh);
+        .exp();
+    let scale = vortices / min_wh;
+    let stream_octave_range = octave_range(vortices, octave_ceiling(vortices, min_wh));
     let octaves = rng.gen_range(stream_octave_range.clone());
 
     let noise = GradientNoise::new(rng.next_u64());
@@ -283,31 +284,44 @@ pub fn render_flow(
     pixmap
 }
 
-/// Octave counts worth summing at a per-pixel `scale`, as an inclusive range. Both ends are
-/// limits rather than choices, and they close on each other as `scale` rises.
+/// Octave counts worth summing at a per-screen cell count, as an inclusive range. Both ends are
+/// limits rather than choices, and they close on each other as `cells` rises.
 ///
-/// `fbm` sums octaves `1..=n`, and octave `k` has a lattice cell of `1 / (scale * 2^(k-1))`
-/// pixels, so a count is bounded on both sides:
+/// `fbm` sums octaves `1..=n`, and octave `k` has a lattice cell `2^(k-1)` times finer than the
+/// count it is given, so a count is bounded on both sides:
 ///
 /// - `coarsest` — the first count with an octave small enough to fit inside the frame. Below it
 ///   every octave in the sum spans the whole image as a ramp rather than as texture, and it is
-///   the coarsest one that carries the largest amplitude share.
-/// - `finest` — the last count whose finest octave still has a cell of at least one pixel.
-///   Gradient noise is zero at every lattice node with its extremum mid-cell, so a cell is half a
-///   period, and one more octave puts the period under two pixels — past there the sum is a
-///   picture of the sampling rather than of the field.
+///   the coarsest one that carries the largest amplitude share. `cells` is how many lattice cells
+///   of octave 1 span the short side, so `1 / cells` is that octave's cell measured in frames, and
+///   the count that first brings one inside the frame follows from it alone.
+/// - `top` — where the octaves stop being worth summing, which is not a property of the field and
+///   so is not this function's to know. `octave_ceiling` is what every caller passes today.
 ///
-/// `finest.max(coarsest)` never actually fires, and is kept only so the range cannot come out
-/// empty by inspection. What already prevents that is the cast: `log2` of a `scale` past 1 is
-/// negative, a negative float saturates to 0 on the way to `u32`, and `finest` lands on 1 — which
-/// is where `coarsest` already is unless a lattice cell is wider than the whole canvas. Removing
-/// the cast, or reaching for a wrapping one, is what would open the hole this looks like it plugs.
-fn octave_range(scale: f64, min_wh: f64) -> RangeInclusive<u32> {
-    let dead = (1.0 / (scale * min_wh)).log2().max(0.0).ceil() as u32;
+/// `top.max(coarsest)` never actually fires, and is kept only so the range cannot come out empty by
+/// inspection. What already prevents it is the cast in `octave_ceiling`, which floors at 1 — where
+/// `coarsest` already is unless a lattice cell is wider than the whole canvas.
+fn octave_range(cells: f64, top: u32) -> RangeInclusive<u32> {
+    let dead = (1.0 / cells).log2().max(0.0).ceil() as u32;
     let coarsest = dead + 1;
-    let finest = (1.0 / scale).log2().floor() as u32 + 1;
 
-    coarsest..=finest.max(coarsest)
+    coarsest..=top.max(coarsest)
+}
+
+/// The most octaves this canvas can carry: the last count whose finest octave still has a cell of
+/// at least one pixel. Gradient noise is zero at every lattice node with its extremum mid-cell, so
+/// a cell is half a period, and one more octave puts the period under two pixels — past there the
+/// sum is a picture of the sampling rather than of the field.
+///
+/// Split out of `octave_range` because the two ends answer different questions. The floor is a
+/// property of the field and holds whatever it is drawn on; this end is a property of the output
+/// and nothing else, and separating them is what lets a later change move one without the other.
+///
+/// The cast is what stops it from running backwards: `log2` of a cell under a pixel is negative, a
+/// negative float saturates to 0 on the way to `u32`, and the result lands on 1. Removing it, or
+/// reaching for a wrapping one, is what would open the hole this looks like it plugs.
+fn octave_ceiling(cells: f64, min_wh: f64) -> u32 {
+    (min_wh / cells).log2().floor() as u32 + 1
 }
 
 /// How far apart the domain warp moves the sample points of two adjacent pixels, at unit warp
@@ -868,8 +882,8 @@ colors:
         1.0 / (scale * 2f64.powi(octave as i32 - 1))
     }
 
-    /// Every `(min_wh, scale, octaves)` a layer can actually draw, given the per-screen feature
-    /// count it draws from. Sampling the count log-uniformly matches how `render_flow` draws it.
+    /// Every `(min_wh, cells, octaves)` a layer can actually draw, given the per-screen cell count
+    /// it draws from. Sampling the count log-uniformly matches how `render_flow` draws it.
     ///
     /// `top_is_drawable` mirrors whether that draw is over a closed or a half-open range, and it
     /// has to: the top of the wash's range is the sampling limit itself, so the difference between
@@ -895,10 +909,10 @@ colors:
             };
 
             for i in 0..STEPS {
-                let vortex_ln = lo + (hi - lo) * i as f64 / STEPS as f64;
-                for scale in [vortex_ln.exp() / min_wh, top.exp() / min_wh] {
-                    for octaves in octave_range(scale, min_wh) {
-                        cases.push((min_wh, scale, octaves));
+                let cells_ln = lo + (hi - lo) * i as f64 / STEPS as f64;
+                for cells in [cells_ln.exp(), top.exp()] {
+                    for octaves in octave_range(cells, octave_ceiling(cells, min_wh)) {
+                        cases.push((min_wh, cells, octaves));
                     }
                 }
             }
@@ -930,8 +944,9 @@ colors:
     /// coarsest of them that carries the largest amplitude share.
     #[test]
     fn every_reachable_octave_count_starts_inside_the_frame() {
-        for (min_wh, scale, _) in streamline_cases().into_iter().chain(wash_cases()) {
-            let coarsest = *octave_range(scale, min_wh).start();
+        for (min_wh, cells, _) in streamline_cases().into_iter().chain(wash_cases()) {
+            let scale = cells / min_wh;
+            let coarsest = *octave_range(cells, octave_ceiling(cells, min_wh)).start();
             let cell = cell_px(scale, coarsest);
             assert!(
                 cell <= min_wh,
@@ -941,13 +956,14 @@ colors:
         }
     }
 
-    /// The ceiling, and the reason it is not `finest.max(coarsest)` doing the work: a cell of
-    /// under a pixel puts the octave's period under two and the sum stops representing the field.
+    /// The ceiling, and the reason it is not `top.max(coarsest)` doing the work: a cell of under a
+    /// pixel puts the octave's period under two and the sum stops representing the field.
     /// This is what fails if `VORTEX_PER_SCREEN_RANGE` or the wash's range is opened too far.
     #[test]
     fn every_reachable_octave_count_stops_at_the_pixel_grid() {
-        for (min_wh, scale, _) in streamline_cases().into_iter().chain(wash_cases()) {
-            let finest = *octave_range(scale, min_wh).end();
+        for (min_wh, cells, _) in streamline_cases().into_iter().chain(wash_cases()) {
+            let scale = cells / min_wh;
+            let finest = octave_ceiling(cells, min_wh);
             let cell = cell_px(scale, finest);
             assert!(
                 cell >= 1.0,
@@ -968,7 +984,8 @@ colors:
     /// derived rather than chosen. Moving either way has to cost.
     #[test]
     fn curl_eps_sits_at_the_minimum_of_the_two_error_sources() {
-        for (_, scale, octaves) in streamline_cases() {
+        for (min_wh, cells, octaves) in streamline_cases() {
+            let scale = cells / min_wh;
             let h = curl_eps(scale, octaves) * scale;
             let here = central_difference_error(h, octaves);
             for factor in [0.1, 0.5, 2.0, 10.0] {
@@ -988,7 +1005,8 @@ colors:
     /// comes back exactly zero.
     #[test]
     fn curl_eps_clears_both_the_sign_flip_and_the_cancellation_floor() {
-        for (_, scale, octaves) in streamline_cases() {
+        for (min_wh, cells, octaves) in streamline_cases() {
+            let scale = cells / min_wh;
             let h = curl_eps(scale, octaves) * scale;
             let k_max = PI * 2f64.powi(octaves as i32 - 1);
             assert!(
@@ -1089,11 +1107,12 @@ colors:
 
         let mut derived = (f64::MAX, f64::MIN);
         let mut fixed = (f64::MAX, f64::MIN);
-        for (seed, (_, scale, octaves)) in streamline_cases()
+        for (seed, (min_wh, cells, octaves)) in streamline_cases()
             .into_iter()
             .step_by(SAMPLE_EVERY)
             .enumerate()
         {
+            let scale = cells / min_wh;
             let step = streamline_step_length(scale, octaves);
             let e = median_chord_error_px(scale, octaves, step, seed as u64);
             derived = (derived.0.min(e), derived.1.max(e));
