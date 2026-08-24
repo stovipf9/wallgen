@@ -202,7 +202,7 @@ impl GlyphWord {
     /// checker: no stroke weight is implied, and it reads as a matrix display rather than as a
     /// letterform with a thickness. Equal pitch on both axes is also what makes `ROW_RANGE` above
     /// `COL_RANGE` produce a cell taller than it is wide.
-    const DOT_GAP: f64 = 1.0;
+    const DOT_GAP: f64 = Self::DOT_SIZE;
     /// Space between cells, in dot widths. Above `DOT_GAP` is what separates the characters — at
     /// exactly `DOT_GAP` the whole word would be one even grid and no cell boundary would be
     /// readable.
@@ -441,7 +441,7 @@ impl Digits {
     const DIGIT_WIDTH: f64 = 1.0;
     /// Twice as tall as wide, fixed rather than drawn: it is what makes a seven-segment cell read
     /// as one, the two stacked squares the layout is built from.
-    const DIGIT_HEIGHT: f64 = 2.0;
+    const DIGIT_HEIGHT: f64 = 2.0 * Self::DIGIT_WIDTH;
     /// Segment thickness, against the cell's *width* rather than its height, so the three
     /// horizontal bars keep their weight while `DIGIT_HEIGHT` stretches the vertical ones. The
     /// span covers a thin LCD through a chunky LED.
