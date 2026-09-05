@@ -13,7 +13,7 @@ use tiny_skia::{BlendMode, Color, Paint, PathBuilder, Pixmap, Point, Rect, Strok
 
 use crate::{
     dreamcore::{Fragment, IconShape},
-    flow::{advect_rk2, curl_velocity},
+    flow::advect_rk2_projected,
     noise::GradientNoise,
     palette::{Palette, Rgb},
 };
@@ -67,10 +67,12 @@ const STREAM_CELLS_PER_SCREEN_TOP: f64 = 512.0;
 /// - Streamline curl: uses the *unwarped* fbm as its potential (this one is sampled millions of
 ///   times across all the RK2 steps of every streamline, so it stays cheap — the warp cost is
 ///   paid only once per background pixel, not per streamline step).
-/// - Each of `streamline_count` streamlines is seeded at a random point, advected via
-///   `advect_rk2`, and drawn as a 3-stage tapered filament (thin/low-alpha tip → thick/full-alpha
-///   middle → thin/medium-alpha tail), using `BlendMode::Screen` so overlapping filaments brighten
-///   each other rather than occlude.
+/// - Each of `streamline_count` streamlines is seeded at a random point and advected via
+///   `advect_rk2_projected`, which holds it on the level set it started from and stops as soon as
+///   it comes back round — so a closed orbit is drawn once, at its own circumference, rather than
+///   retraced until the budget runs out. Each is drawn as a 3-stage tapered filament
+///   (thin/low-alpha tip → thick/full-alpha middle → thin/medium-alpha tail), using
+///   `BlendMode::Screen` so overlapping filaments brighten each other rather than occlude.
 /// - One accent color for the whole image rather than one per filament: every filament here is
 ///   tracing the same potential, and a single hue is what says so. `render_dreamcore` picks per
 ///   fragment for the matching reason — its fragments have nothing to do with one another.
@@ -237,7 +239,6 @@ pub fn render_flow(
     let noise = GradientNoise::new(rng.next_u64());
     let potential = |x: f64, y: f64| noise.fbm(x * scale + offset.0, y * scale + offset.1, octaves);
     let eps = curl_eps(scale, octaves);
-    let dir = |x, y| curl_velocity(potential, x, y, eps);
     let step_length = streamline_step_length(scale, octaves);
     let mut stream_color = to_color(
         *palette
@@ -251,31 +252,26 @@ pub fn render_flow(
         //
         // - Lower, the short side: the shortest run that can cross the frame at all. Under it a
         //   filament cannot span the composition in any direction, whatever it is drawn on.
-        // - Upper, the frame's perimeter. `advect_rk2` ends only at the frame edge or here, so a
-        //   filament that lands on a closed level set retraces it until this runs out. A convex
-        //   curve enclosed by a convex region is never longer than that region's own boundary, so
-        //   the perimeter is one lap around the largest ring the frame can hold, and past it even
-        //   that ring has started a second lap.
-        //
-        // Retracing is the intent, not the accident it looks like: under `BlendMode::Screen` every
-        // lap adds, and the drift onto neighboring level sets fills the orbit in, so a small closed
-        // orbit reads as a lit ring at an extremum of the field. Stopping on closure instead was
-        // built and compared side by side — it leaves those orbits as thin single outlines and
-        // touches nothing else — and that was not the picture wanted.
-        //
-        // Level sets are not convex, and a convoluted one outruns that bound and so closes late or
-        // never. The upper end is the ring worth completing, not every ring.
+        // - Upper, the frame's perimeter. This end used to carry a derivation: advection ended only
+        //   at the frame edge or here, so a filament on a closed level set retraced it until the
+        //   budget ran out, and the perimeter was one lap around the largest ring the frame can
+        //   hold — past it, even that ring had started a second lap. Ending on closure retired that
+        //   argument: an orbit is now traced once at its own circumference, and the budget never
+        //   decides how many laps it gets. What is left is the longest run worth giving one filament
+        //   against this frame, which is a statement about the composition rather than the
+        //   derivation it replaced, and it is the weaker of the two ends for it.
         //
         // Both ends move with the output size, unlike the ranges #5 is about, and here that is the
         // point rather than a violation: the draw is a length measured against a frame, so one seed
         // gives a filament the same fraction of the frame at every resolution — and takes the same
         // single value out of the stream to do it.
-        let stream_points = advect_rk2(
+        let (stream_points, _) = advect_rk2_projected(
             (
-                rng.gen_range(0.0..width as f64),
-                rng.gen_range(0.0..height as f64),
+                rng.gen_range(0.0..=width as f64),
+                rng.gen_range(0.0..=height as f64),
             ),
-            dir,
+            potential,
+            eps,
             step_length,
             (rng.gen_range(min_wh..=2.0 * (width + height) as f64) / step_length) as u32,
             (0.0, 0.0),
@@ -929,6 +925,12 @@ pub fn render_dreamcore<R: Rng>(
 mod tests {
     use super::*;
 
+    // `render_flow` traces isolines through `advect_rk2_projected`, which takes the potential and
+    // derives the direction itself. `median_chord_error_px` wants the plain advection instead —
+    // one step against the same arc walked in sixteen — so it is the tests, and only the tests,
+    // that still reach for the unprojected pair.
+    use crate::flow::{advect_rk2, curl_velocity};
+
     /// Short sides worth covering, from a small window to 8K.
     const SHORT_SIDES: [f64; 7] = [240.0, 480.0, 720.0, 1080.0, 1440.0, 2160.0, 4320.0];
 
@@ -1253,16 +1255,7 @@ colors:
         }
     }
 
-    /// Perpendicular distance from `p` to the segment `a`-`b`.
-    fn distance_to_chord(p: (f64, f64), a: (f64, f64), b: (f64, f64)) -> f64 {
-        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
-        let length_squared = dx * dx + dy * dy;
-        if length_squared == 0.0 {
-            return (p.0 - a.0).hypot(p.1 - a.1);
-        }
-        let t = (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / length_squared).clamp(0.0, 1.0);
-        (p.0 - (a.0 + t * dx)).hypot(p.1 - (a.1 + t * dy))
-    }
+    use crate::flow::distance_to_segment;
 
     /// How far one step of `step` departs from the arc it stands in for, in pixels, on the real
     /// field rather than on a model of it: walk the same arc in `SUBSTEPS` smaller steps and take
@@ -1303,7 +1296,7 @@ colors:
                     (UNBOUNDED.1, UNBOUNDED.1),
                 );
                 arc.iter()
-                    .map(|&p| distance_to_chord(p, chord[0], chord[1]))
+                    .map(|&p| distance_to_segment(p, chord[0], chord[1]))
                     .fold(0.0f64, f64::max)
             })
             .collect();
