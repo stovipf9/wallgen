@@ -267,8 +267,8 @@ pub fn render_flow(
         // single value out of the stream to do it.
         let (stream_points, _) = advect_rk2_projected(
             (
-                rng.gen_range(0.0..width as f64),
-                rng.gen_range(0.0..height as f64),
+                rng.gen_range(0.0..=width as f64),
+                rng.gen_range(0.0..=height as f64),
             ),
             potential,
             eps,
