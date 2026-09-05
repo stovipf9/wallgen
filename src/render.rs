@@ -1255,16 +1255,7 @@ colors:
         }
     }
 
-    /// Perpendicular distance from `p` to the segment `a`-`b`.
-    fn distance_to_chord(p: (f64, f64), a: (f64, f64), b: (f64, f64)) -> f64 {
-        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
-        let length_squared = dx * dx + dy * dy;
-        if length_squared == 0.0 {
-            return (p.0 - a.0).hypot(p.1 - a.1);
-        }
-        let t = (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / length_squared).clamp(0.0, 1.0);
-        (p.0 - (a.0 + t * dx)).hypot(p.1 - (a.1 + t * dy))
-    }
+    use crate::flow::distance_to_segment;
 
     /// How far one step of `step` departs from the arc it stands in for, in pixels, on the real
     /// field rather than on a model of it: walk the same arc in `SUBSTEPS` smaller steps and take
@@ -1305,7 +1296,7 @@ colors:
                     (UNBOUNDED.1, UNBOUNDED.1),
                 );
                 arc.iter()
-                    .map(|&p| distance_to_chord(p, chord[0], chord[1]))
+                    .map(|&p| distance_to_segment(p, chord[0], chord[1]))
                     .fold(0.0f64, f64::max)
             })
             .collect();
